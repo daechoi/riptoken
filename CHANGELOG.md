@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-04-11
+
+Second release. Headline changes: `get_encoding` / `encoding_for_model`
+helpers, a parallel batch API, and a SIMD regex fast path that covers
+every stock tiktoken encoding. Single-threaded throughput on `o200k_base`
+improves from the 1.8×–2.7× range to 2.4×–6.2× over tiktoken; parallel
+batch encoding scales to 19× on wide machines.
+
 ### Added
 
 - `riptoken.get_encoding(name)` and `riptoken.encoding_for_model(model)` —
@@ -40,9 +48,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   engine) so the DFA cache pool is not contended at high thread counts.
   On 32-core Sapphire Rapids, parallel throughput improved from
   ~95M tps (6.2×) to ~290M tps (19×) for o200k_base batch encode.
+- Tests, benchmark, and CI no longer require a local `o200k_base.tiktoken`
+  vocab file. They route through `riptoken.get_encoding("o200k_base")`
+  (and therefore tiktoken's on-disk cache) instead.
 - Micro-optimizations: pre-allocated output vectors sized from input length,
   `#[inline(always)]` on the hot `rank_of` helper, zero-allocation
   `HashMap::get(&[u8])` lookup replacing the prior `.to_vec()`.
+
+### Performance
+
+Measured against `tiktoken 0.7+` on an M-series Mac, Python 3.13, release
+builds of both libraries. Vocab: `o200k_base`. Median of 3 runs.
+
+| Corpus                 |  Tokens | riptoken tps | tiktoken tps | Speedup |
+| ---------------------- | ------: | -----------: | -----------: | ------- |
+| English prose          |  40,001 |        15.7M |         3.1M | 5.03×   |
+| Python source code     |  72,501 |        16.4M |         2.7M | 6.13×   |
+| Rust source code       |  88,001 |        18.0M |         3.1M | 5.88×   |
+| Multilingual + emoji   |  85,600 |         8.9M |         3.6M | 2.47×   |
+| Random-ish bytes       | 120,000 |        18.0M |         4.3M | 4.17×   |
 
 ## [0.1.0] — 2026-04-11
 
