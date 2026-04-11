@@ -238,7 +238,9 @@ fn try_transform_for_fast_regex(pattern: &str) -> Option<(FastRegex, ShrinkMode)
 /// without needing capture groups.
 #[inline]
 fn is_plain_whitespace_run(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| c.is_whitespace() && c != '\n' && c != '\r')
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_whitespace() && c != '\n' && c != '\r')
 }
 
 /// True if `s` consists entirely of whitespace (any kind, including `\n`/`\r`).
@@ -347,10 +349,7 @@ impl SplitEngine {
                         ShrinkMode::PlainOnly => is_plain_whitespace_run(piece),
                         ShrinkMode::Unified => is_whitespace_run(piece),
                     };
-                    if should_shrink
-                        && end < text.len()
-                        && next_char_is_non_whitespace(text, end)
-                    {
+                    if should_shrink && end < text.len() && next_char_is_non_whitespace(text, end) {
                         // Find the byte offset of the last char in the piece.
                         if let Some((last_i, _)) = piece.char_indices().next_back() {
                             // Only shrink if the piece has more than one char.
@@ -626,9 +625,7 @@ fn byte_pair_merge_large(ranks: &HashMap<Vec<u8>, Rank>, piece: &[u8]) -> Vec<Ra
 ///
 /// Returns `None` if `specials` is empty — callers should then skip the
 /// special-token scan entirely.
-fn build_special_regex(
-    specials: &HashMap<String, Rank>,
-) -> Result<Option<FancyRegex>, BuildError> {
+fn build_special_regex(specials: &HashMap<String, Rank>) -> Result<Option<FancyRegex>, BuildError> {
     if specials.is_empty() {
         return Ok(None);
     }
@@ -748,20 +745,13 @@ impl CoreBPE {
     /// `rayon::ThreadPoolBuilder`.
     pub fn encode_ordinary_batch(&self, texts: &[&str]) -> Vec<Vec<Rank>> {
         use rayon::prelude::*;
-        texts
-            .par_iter()
-            .map(|t| self.encode_ordinary(t))
-            .collect()
+        texts.par_iter().map(|t| self.encode_ordinary(t)).collect()
     }
 
     /// Encode many texts in parallel using rayon, honoring special tokens.
     ///
     /// See [`CoreBPE::encode`] for the special-token semantics.
-    pub fn encode_batch(
-        &self,
-        texts: &[&str],
-        allowed_special: &HashSet<&str>,
-    ) -> Vec<Vec<Rank>> {
+    pub fn encode_batch(&self, texts: &[&str], allowed_special: &HashSet<&str>) -> Vec<Vec<Rank>> {
         use rayon::prelude::*;
         texts
             .par_iter()
@@ -920,8 +910,7 @@ impl CoreBPE {
     ) -> Vec<Vec<Rank>> {
         py.detach(|| {
             let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
-            let allowed_refs: HashSet<&str> =
-                allowed_special.iter().map(|s| s.as_str()).collect();
+            let allowed_refs: HashSet<&str> = allowed_special.iter().map(|s| s.as_str()).collect();
             self.encode_batch(&refs, &allowed_refs)
         })
     }
@@ -1176,10 +1165,7 @@ mod tests {
         // "\n" at end of input should stay whole — `\s+$` consumes it, and
         // with no following non-whitespace there's nothing to shrink for.
         let tokens = bpe.encode_ordinary("hi\n");
-        assert_eq!(
-            tokens,
-            vec![b'h' as Rank, b'i' as Rank, b'\n' as Rank]
-        );
+        assert_eq!(tokens, vec![b'h' as Rank, b'i' as Rank, b'\n' as Rank]);
     }
 
     #[test]

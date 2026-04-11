@@ -34,7 +34,10 @@ fn load(path: &str) -> FxHashMap<Vec<u8>, Rank> {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let path = args.get(1).map(|s| s.as_str()).unwrap_or("o200k_base.tiktoken");
+    let path = args
+        .get(1)
+        .map(|s| s.as_str())
+        .unwrap_or("o200k_base.tiktoken");
 
     let pat = concat!(
         r"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?",
@@ -55,10 +58,7 @@ fn main() {
 
     let text: String = "The quick brown fox jumps over the lazy dog. ".repeat(1000);
     let n_tok_per_doc = bpe.encode_ordinary(&text).len();
-    eprintln!(
-        "rayon pool size: {}",
-        rayon::current_num_threads()
-    );
+    eprintln!("rayon pool size: {}", rayon::current_num_threads());
     eprintln!("tokens per doc: {}", n_tok_per_doc);
 
     // Sequential baseline.
