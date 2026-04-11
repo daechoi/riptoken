@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-04-11
+
+Patch release. Makes `tiktoken` a required runtime dependency so that
+`riptoken.get_encoding("gpt2")` works out of the box after a plain
+`pip install riptoken`. Previously `tiktoken` was a soft dependency
+imported on demand, and first-time users hit an `ImportError` at the
+most obvious entry point.
+
+### Fixed
+
+- `pip install riptoken` now pulls in `tiktoken>=0.7` automatically, so
+  `riptoken.get_encoding` and `riptoken.encoding_for_model` work without
+  a second install step. Users who want a tiktoken-free install can
+  still construct `CoreBPE` directly from a `.tiktoken` file via
+  `riptoken.load_tiktoken_bpe`.
+
 ## [0.2.0] — 2026-04-11
 
 Second release. Headline changes: `get_encoding` / `encoding_for_model`

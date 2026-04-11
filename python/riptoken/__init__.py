@@ -36,7 +36,7 @@ from typing import Union
 
 from riptoken._riptoken import CoreBPE
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 __all__ = ["CoreBPE", "encoding_for_model", "get_encoding", "load_tiktoken_bpe"]
 
 
