@@ -9,17 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `riptoken.get_encoding(name)` and `riptoken.encoding_for_model(model)` —
+  drop-in equivalents of the tiktoken helpers. These soft-depend on
+  `tiktoken` to supply vocabulary files, regex patterns, and special-token
+  maps, then wrap them in riptoken's faster Rust core. Parity tested
+  against tiktoken on `gpt2`, `r50k_base`, `p50k_base`, `cl100k_base`,
+  and `o200k_base`.
 - `CoreBPE::encode_ordinary_batch` and `CoreBPE::encode_batch` for parallel
   batch encoding, fanning out to rayon's global thread pool. Python bindings
   (`encode_ordinary_batch`, `encode_batch`) release the GIL for the full batch.
 
 ### Changed
 
-- The SIMD fast-path engine now uses the `regex` crate for tiktoken-style
-  patterns whose lookaround can be peeled off (all of `cl100k_base`,
-  `o200k_base`, `p50k_base`). The `\s+(?!\S)` whitespace-shrink rule is
-  reproduced in Rust code, producing byte-identical output to tiktoken.
-  Patterns with other lookarounds fall back to `fancy-regex` as before.
+- The SIMD fast-path engine now uses the `regex` crate for every stock
+  tiktoken pattern — `gpt2`, `r50k_base`, `p50k_base`, `cl100k_base`, and
+  `o200k_base`. The `\s+(?!\S)` whitespace-shrink rule is reproduced in
+  Rust code, producing byte-identical output to tiktoken. Patterns with
+  other lookarounds fall back to `fancy-regex` as before.
+- Fast-path transform recognizes both tiktoken pattern families and
+  selects the shrink rule accordingly: `o200k`/`cl100k` have a separate
+  `\s*[\r\n]+` alternative, so the shrink only fires on plain whitespace
+  runs; `gpt2`/`r50k`/`p50k` have no such alternative, so the shrink fires
+  on any whitespace run including ones that contain newlines.
+- Fast-path transform also converts possessive quantifiers (`?+`, `++`,
+  `*+`, `{n,m}+`) to greedy form so the DFA engine interprets them
+  correctly. In a DFA engine possessive markers are semantically
+  unnecessary (no backtracking to disable) and in every tiktoken pattern
+  the alternatives are disjoint enough that the rewrite is safe.
 - Fast-path regex now uses per-thread clones (same pattern as the fancy
   engine) so the DFA cache pool is not contended at high thread counts.
   On 32-core Sapphire Rapids, parallel throughput improved from

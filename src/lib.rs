@@ -125,24 +125,67 @@ impl std::error::Error for DecodeError {}
 
 // --- Split engine dispatch ---------------------------------------------------
 
+/// How to apply the whitespace-shrink rule in the fast-path engine.
+///
+/// The rule reproduces tiktoken's `\s+(?!\S)` alternative — "match a
+/// whitespace run but don't swallow the last char if a non-whitespace char
+/// follows, so it can attach to the following word via the word
+/// alternative's optional non-word prefix".
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum ShrinkMode {
+    /// No `\s+(?!\S)` alternative in the original pattern (e.g. a toy
+    /// pattern like `\w+|\s+`). No shrinking is applied.
+    None,
+    /// o200k / cl100k style: the pattern has a separate `\s*[\r\n]+`
+    /// alternative which takes priority and matches any whitespace run
+    /// containing a newline as its own piece. The shrink rule should only
+    /// fire on plain whitespace runs — newline runs are emitted whole.
+    PlainOnly,
+    /// gpt2 / r50k / p50k style: no separate newline alternative, so
+    /// `\s+(?!\S)` absorbs every whitespace run, newlines included. The
+    /// shrink rule should fire on any whitespace run.
+    Unified,
+}
+
 /// Try to rewrite a tiktoken-style pattern into a form that the SIMD-accelerated
 /// `regex` crate can compile.
 ///
 /// The only transformation applied is stripping the `\s+(?!\S)` alternative,
-/// which appears in `cl100k_base` / `o200k_base` / `p50k_base`. Its purpose —
-/// "leave the last whitespace of a run for the next word's leading-space
-/// prefix" — is replicated in Rust code by [`SplitEngine::find_pieces`] when
-/// running on the fast path.
+/// which appears in every stock tiktoken encoding. Its purpose — "leave the
+/// last whitespace of a run for the next word's leading-space prefix" — is
+/// replicated in Rust code by [`SplitEngine::find_pieces`] when running on
+/// the fast path, using the returned [`ShrinkMode`] to select which
+/// whitespace runs the shrink should fire on.
 ///
-/// Returns `Some(transformed)` if the pattern compiles successfully with the
-/// `regex` crate after transformation, or `None` if the pattern contains
+/// Returns `Some((regex, mode))` if the pattern compiles successfully with
+/// the `regex` crate after transformation, or `None` if the pattern contains
 /// other lookarounds (or features) that regex can't handle — in which case
 /// the caller falls back to `fancy-regex`.
-fn try_transform_for_fast_regex(pattern: &str) -> Option<FastRegex> {
-    // 1. Drop the `\s+(?!\S)|` alternative. This is the only tiktoken
-    //    lookaround in practice; the semantics it encodes are handled below
-    //    in fast_find_pieces via whitespace post-processing.
-    let stripped = pattern.replace(r"\s+(?!\S)|", "");
+fn try_transform_for_fast_regex(pattern: &str) -> Option<(FastRegex, ShrinkMode)> {
+    // 1. Collapse the whitespace-run tail and classify the pattern family.
+    //    Every stock tiktoken pattern ends with one of two shapes:
+    //       ...|\s*[\r\n]+|\s+(?!\S)|\s+   (o200k/cl100k-style)
+    //       ...|\s+$|\s+(?!\S)|\s          (gpt2/r50k/p50k-style)
+    //    We collapse the `\s+(?!\S)|...` pair into a single greedy `\s+`
+    //    and reproduce the "leave last char" semantics in `find_pieces`
+    //    below. The `ShrinkMode` distinguishes the two families so the
+    //    shrink rule can be applied correctly: in the o200k family the
+    //    separate `\s*[\r\n]+` alternative already handles runs that
+    //    contain a newline, so shrink must only fire on plain whitespace
+    //    runs; in the gpt2 family there is no such alternative and shrink
+    //    must fire on any whitespace run.
+    //
+    //    Order matters: the more specific `\s+` form must be tried before
+    //    the bare `\s` form, otherwise we'd leave a trailing `+` behind.
+    let shrink_mode = if pattern.contains(r"\s+(?!\S)|\s+") {
+        ShrinkMode::PlainOnly
+    } else if pattern.contains(r"\s+(?!\S)|\s") {
+        ShrinkMode::Unified
+    } else {
+        ShrinkMode::None
+    };
+    let mut stripped = pattern.replace(r"\s+(?!\S)|\s+", r"\s+");
+    stripped = stripped.replace(r"\s+(?!\S)|\s", r"\s+");
     // 2. Reject anything that still contains a lookaround. We intentionally
     //    don't try to be clever — any residual `(?=`, `(?!`, `(?<=`, `(?<!`
     //    means we fall back to fancy-regex.
@@ -153,21 +196,60 @@ fn try_transform_for_fast_regex(pattern: &str) -> Option<FastRegex> {
     {
         return None;
     }
-    // 3. Try to compile with the regex crate. Unicode property classes like
+    // 3. Convert possessive quantifiers to greedy. tiktoken's newer
+    //    cl100k_base / p50k_base / o200k_base patterns use `?+`, `++`,
+    //    `*+`, `{n,m}+` as backtracking-engine speed hints ("don't retry
+    //    this match"). The regex crate's parser silently accepts the
+    //    syntax but its DFA interprets it differently, producing wrong
+    //    matches.
+    //
+    //    In a DFA engine possessive markers are semantically unnecessary:
+    //    the DFA is already linear-time and has no backtracking to
+    //    disable. And in every tiktoken pattern the possessive and greedy
+    //    matches are identical by construction — the alternatives are
+    //    disjoint enough that backtracking would never change the result
+    //    — so converting possessive → greedy is safe.
+    //
+    //    Simple string replace handles `?+`, `++`, `*+` (tiktoken patterns
+    //    never put these chars inside `[...]` or escape them). `{n,m}+`
+    //    needs care: `\p{L}+` also contains the literal sequence `}+`,
+    //    but the `+` there is a greedy quantifier on the class, not a
+    //    possessive marker — so we use a precise regex to match only
+    //    ranges `{digits[,digits]}+`.
+    stripped = stripped
+        .replace("?+", "?")
+        .replace("++", "+")
+        .replace("*+", "*");
+    let range_possessive = FastRegex::new(r"(\{\d+(?:,\d*)?\})\+").ok()?;
+    let stripped = range_possessive.replace_all(&stripped, "$1").into_owned();
+    // 4. Try to compile with the regex crate. Unicode property classes like
     //    `\p{L}`, `\p{N}` are supported by default.
-    FastRegex::new(&stripped).ok()
+    let regex = FastRegex::new(&stripped).ok()?;
+    Some((regex, shrink_mode))
 }
 
 /// True if `s` consists entirely of whitespace with no `\n` or `\r`.
 ///
-/// The whitespace-shrink rule for `\s+(?!\S)` must NOT fire on matches that
-/// contain a newline — those come from the `\s*[\r\n]+` alternative in the
-/// tiktoken pattern, which takes priority in the alternation and is emitted
-/// whole. Checking "contains no newline" is a reliable way to distinguish a
-/// `\s+` match from a `\s*[\r\n]+` match without needing capture groups.
+/// Used under [`ShrinkMode::PlainOnly`] (o200k/cl100k family): the whitespace
+/// shrink rule must NOT fire on matches that contain a newline, because those
+/// come from the `\s*[\r\n]+` alternative in the pattern, which takes priority
+/// in the alternation and is emitted whole. Checking "contains no newline" is
+/// a reliable way to distinguish a `\s+` match from a `\s*[\r\n]+` match
+/// without needing capture groups.
 #[inline]
 fn is_plain_whitespace_run(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_whitespace() && c != '\n' && c != '\r')
+}
+
+/// True if `s` consists entirely of whitespace (any kind, including `\n`/`\r`).
+///
+/// Used under [`ShrinkMode::Unified`] (gpt2/r50k/p50k family): there is no
+/// separate newline alternative in those patterns, so `\s+(?!\S)` absorbs
+/// whitespace runs containing newlines and the shrink rule must fire on
+/// them too.
+#[inline]
+fn is_whitespace_run(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_whitespace())
 }
 
 /// True if the next char in `s` (starting at `pos`) is a non-whitespace char.
@@ -188,8 +270,12 @@ fn next_char_is_non_whitespace(text: &str, pos: usize) -> bool {
 /// pool becomes a contention point, so we give each thread its own instance.
 /// The clones are cheap (regex state is Arc-shared internally).
 enum SplitEngine {
-    /// SIMD-accelerated, finite-automaton regex. One clone per thread slot.
-    Fast(Vec<FastRegex>),
+    /// SIMD-accelerated, finite-automaton regex. One clone per thread slot,
+    /// plus a [`ShrinkMode`] selecting how to emulate `\s+(?!\S)` in Rust.
+    Fast {
+        clones: Vec<FastRegex>,
+        shrink_mode: ShrinkMode,
+    },
     /// Backtracking regex with lookaround support. One clone per thread slot.
     Fancy(Vec<FancyRegex>),
 }
@@ -198,9 +284,12 @@ impl SplitEngine {
     /// Build an engine for `pattern`. Attempts the fast path first and falls
     /// back to fancy-regex if the pattern can't be transformed.
     fn new(pattern: &str) -> Result<Self, BuildError> {
-        if let Some(fast) = try_transform_for_fast_regex(pattern) {
+        if let Some((fast, shrink_mode)) = try_transform_for_fast_regex(pattern) {
             let clones: Vec<FastRegex> = (0..MAX_NUM_THREADS).map(|_| fast.clone()).collect();
-            return Ok(SplitEngine::Fast(clones));
+            return Ok(SplitEngine::Fast {
+                clones,
+                shrink_mode,
+            });
         }
         let fancy = FancyRegex::new(pattern)?;
         let clones: Vec<FancyRegex> = (0..MAX_NUM_THREADS).map(|_| fancy.clone()).collect();
@@ -210,7 +299,7 @@ impl SplitEngine {
     /// True if this engine took the fast path. Useful for tests and stats.
     #[cfg(test)]
     fn is_fast(&self) -> bool {
-        matches!(self, SplitEngine::Fast(_))
+        matches!(self, SplitEngine::Fast { .. })
     }
 
     /// Iterate the pieces of `text`, invoking `f` with each piece as a `&str`.
@@ -220,7 +309,10 @@ impl SplitEngine {
     #[inline]
     fn find_pieces<F: FnMut(&str)>(&self, text: &str, mut f: F) {
         match self {
-            SplitEngine::Fast(clones) => {
+            SplitEngine::Fast {
+                clones,
+                shrink_mode,
+            } => {
                 let regex = &clones[thread_index()];
                 let mut pos = 0;
                 while pos < text.len() {
@@ -244,10 +336,18 @@ impl SplitEngine {
                     // if a non-whitespace char follows". Replicate by
                     // shrinking by one char in exactly that situation.
                     //
-                    // Only plain whitespace runs (no newlines) take this
-                    // path — matches containing `\n`/`\r` come from the
-                    // `\s*[\r\n]+` alternative, which must be emitted whole.
-                    if is_plain_whitespace_run(piece)
+                    // Under `PlainOnly` (o200k/cl100k), the shrink fires
+                    // only on runs without newlines — matches containing
+                    // `\n`/`\r` came from the separate `\s*[\r\n]+`
+                    // alternative and are emitted whole. Under `Unified`
+                    // (gpt2/r50k/p50k), there is no such alternative, so
+                    // the shrink fires on every whitespace run.
+                    let should_shrink = match shrink_mode {
+                        ShrinkMode::None => false,
+                        ShrinkMode::PlainOnly => is_plain_whitespace_run(piece),
+                        ShrinkMode::Unified => is_whitespace_run(piece),
+                    };
+                    if should_shrink
                         && end < text.len()
                         && next_char_is_non_whitespace(text, end)
                     {
@@ -1043,6 +1143,43 @@ mod tests {
         // — the trailing whitespace has no following word so it stays full.
         let tokens = bpe.encode_ordinary("hello ");
         assert_eq!(tokens, vec![1001, b' ' as Rank]);
+    }
+
+    #[test]
+    fn whitespace_shrink_unified_mode_includes_newlines() {
+        // gpt2 / r50k / p50k-style pattern: no separate `\s*[\r\n]+`
+        // alternative, so `\s+(?!\S)` must absorb runs that contain a
+        // newline and the shrink rule must fire on them. Regression test
+        // for parity with tiktoken on gpt2-family encodings.
+        let mut encoder: HashMap<Vec<u8>, Rank> = HashMap::default();
+        for b in 0u8..=255 {
+            encoder.insert(vec![b], b as Rank);
+        }
+        encoder.insert(b" hello".to_vec(), 1000);
+        encoder.insert(b"hello".to_vec(), 1001);
+
+        // Note the bare `\s` at the tail — this is the gpt2 shape.
+        let pattern = r" ?\p{L}+|\s+$|\s+(?!\S)|\s";
+        let bpe = CoreBPE::new(encoder, HashMap::default(), pattern).unwrap();
+        assert!(bpe.split_engine.is_fast());
+
+        // "\n  hello" — the whitespace run `\n  ` contains a newline but
+        // must still be shrunk to `\n ` so the trailing space can attach
+        // to `hello` as ` hello`. Expected pieces: ["\n ", " hello"].
+        let tokens = bpe.encode_ordinary("\n  hello");
+        assert_eq!(
+            tokens,
+            vec![b'\n' as Rank, b' ' as Rank, 1000],
+            "unified shrink mode must fire on whitespace runs that include newlines"
+        );
+
+        // "\n" at end of input should stay whole — `\s+$` consumes it, and
+        // with no following non-whitespace there's nothing to shrink for.
+        let tokens = bpe.encode_ordinary("hi\n");
+        assert_eq!(
+            tokens,
+            vec![b'h' as Rank, b'i' as Rank, b'\n' as Rank]
+        );
     }
 
     #[test]
