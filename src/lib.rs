@@ -33,7 +33,8 @@
 //! assert_eq!(tokens, vec![2]);
 //! ```
 
-use fancy_regex::Regex;
+use fancy_regex::Regex as FancyRegex;
+use regex::Regex as FastRegex;
 use rustc_hash::{FxHashMap as HashMap, FxHasher};
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
@@ -74,8 +75,9 @@ fn thread_index() -> usize {
 /// Errors produced when constructing a [`CoreBPE`].
 #[derive(Debug)]
 pub enum BuildError {
-    /// The regex pattern failed to compile.
-    InvalidRegex(fancy_regex::Error),
+    /// The regex pattern failed to compile in both the fast and the fallback
+    /// engines. Contains the fallback engine's error message.
+    InvalidRegex(String),
     /// The encoder and decoder had mismatched sizes (usually means duplicate
     /// ranks or bytes in the input vocabulary).
     VocabularyMismatch,
@@ -97,7 +99,7 @@ impl std::error::Error for BuildError {}
 
 impl From<fancy_regex::Error> for BuildError {
     fn from(e: fancy_regex::Error) -> Self {
-        BuildError::InvalidRegex(e)
+        BuildError::InvalidRegex(e.to_string())
     }
 }
 
@@ -121,6 +123,169 @@ impl std::fmt::Display for DecodeError {
 
 impl std::error::Error for DecodeError {}
 
+// --- Split engine dispatch ---------------------------------------------------
+
+/// Try to rewrite a tiktoken-style pattern into a form that the SIMD-accelerated
+/// `regex` crate can compile.
+///
+/// The only transformation applied is stripping the `\s+(?!\S)` alternative,
+/// which appears in `cl100k_base` / `o200k_base` / `p50k_base`. Its purpose —
+/// "leave the last whitespace of a run for the next word's leading-space
+/// prefix" — is replicated in Rust code by [`SplitEngine::find_pieces`] when
+/// running on the fast path.
+///
+/// Returns `Some(transformed)` if the pattern compiles successfully with the
+/// `regex` crate after transformation, or `None` if the pattern contains
+/// other lookarounds (or features) that regex can't handle — in which case
+/// the caller falls back to `fancy-regex`.
+fn try_transform_for_fast_regex(pattern: &str) -> Option<FastRegex> {
+    // 1. Drop the `\s+(?!\S)|` alternative. This is the only tiktoken
+    //    lookaround in practice; the semantics it encodes are handled below
+    //    in fast_find_pieces via whitespace post-processing.
+    let stripped = pattern.replace(r"\s+(?!\S)|", "");
+    // 2. Reject anything that still contains a lookaround. We intentionally
+    //    don't try to be clever — any residual `(?=`, `(?!`, `(?<=`, `(?<!`
+    //    means we fall back to fancy-regex.
+    if stripped.contains("(?=")
+        || stripped.contains("(?!")
+        || stripped.contains("(?<=")
+        || stripped.contains("(?<!")
+    {
+        return None;
+    }
+    // 3. Try to compile with the regex crate. Unicode property classes like
+    //    `\p{L}`, `\p{N}` are supported by default.
+    FastRegex::new(&stripped).ok()
+}
+
+/// True if `s` consists entirely of whitespace with no `\n` or `\r`.
+///
+/// The whitespace-shrink rule for `\s+(?!\S)` must NOT fire on matches that
+/// contain a newline — those come from the `\s*[\r\n]+` alternative in the
+/// tiktoken pattern, which takes priority in the alternation and is emitted
+/// whole. Checking "contains no newline" is a reliable way to distinguish a
+/// `\s+` match from a `\s*[\r\n]+` match without needing capture groups.
+#[inline]
+fn is_plain_whitespace_run(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_whitespace() && c != '\n' && c != '\r')
+}
+
+/// True if the next char in `s` (starting at `pos`) is a non-whitespace char.
+/// Returns `false` if `pos` is at end-of-string.
+#[inline]
+fn next_char_is_non_whitespace(text: &str, pos: usize) -> bool {
+    match text[pos..].chars().next() {
+        Some(c) => !c.is_whitespace(),
+        None => false,
+    }
+}
+
+/// The pattern-matching engine used to split text into pieces before BPE.
+///
+/// The fast path (`regex` crate) is SIMD-accelerated and has no per-call
+/// scratch state — one instance is shared across all threads. The fancy path
+/// (`fancy-regex`) supports lookarounds but has thread-local scratch state,
+/// so we clone it per thread slot to avoid contention.
+enum SplitEngine {
+    /// SIMD-accelerated, finite-automaton regex. `Send + Sync`, no clones needed.
+    Fast(FastRegex),
+    /// Backtracking regex with lookaround support. One clone per thread slot.
+    Fancy(Vec<FancyRegex>),
+}
+
+impl SplitEngine {
+    /// Build an engine for `pattern`. Attempts the fast path first and falls
+    /// back to fancy-regex if the pattern can't be transformed.
+    fn new(pattern: &str) -> Result<Self, BuildError> {
+        if let Some(fast) = try_transform_for_fast_regex(pattern) {
+            return Ok(SplitEngine::Fast(fast));
+        }
+        let fancy = FancyRegex::new(pattern)?;
+        let clones: Vec<FancyRegex> = (0..MAX_NUM_THREADS).map(|_| fancy.clone()).collect();
+        Ok(SplitEngine::Fancy(clones))
+    }
+
+    /// True if this engine took the fast path. Useful for tests and stats.
+    #[cfg(test)]
+    fn is_fast(&self) -> bool {
+        matches!(self, SplitEngine::Fast(_))
+    }
+
+    /// Iterate the pieces of `text`, invoking `f` with each piece as a `&str`.
+    ///
+    /// On the fast path, applies the `\s+(?!\S)` whitespace-shrink rule in
+    /// Rust so that output matches tiktoken exactly.
+    #[inline]
+    fn find_pieces<F: FnMut(&str)>(&self, text: &str, mut f: F) {
+        match self {
+            SplitEngine::Fast(regex) => {
+                let mut pos = 0;
+                while pos < text.len() {
+                    let m = match regex.find_at(text, pos) {
+                        Some(m) => m,
+                        None => break,
+                    };
+                    // With well-formed tiktoken patterns every byte matches
+                    // some alternative, so the match should start exactly at
+                    // `pos`. If there's a gap, something unexpected happened
+                    // — skip over it to make progress.
+                    if m.start() > pos {
+                        pos = m.start();
+                    }
+                    let start = m.start();
+                    let mut end = m.end();
+                    let piece = &text[start..end];
+
+                    // Whitespace post-processing: `\s+(?!\S)` means "match
+                    // whitespace run but don't swallow the last whitespace
+                    // if a non-whitespace char follows". Replicate by
+                    // shrinking by one char in exactly that situation.
+                    //
+                    // Only plain whitespace runs (no newlines) take this
+                    // path — matches containing `\n`/`\r` come from the
+                    // `\s*[\r\n]+` alternative, which must be emitted whole.
+                    if is_plain_whitespace_run(piece)
+                        && end < text.len()
+                        && next_char_is_non_whitespace(text, end)
+                    {
+                        // Find the byte offset of the last char in the piece.
+                        if let Some((last_i, _)) = piece.char_indices().next_back() {
+                            // Only shrink if the piece has more than one char.
+                            if last_i > 0 {
+                                end = start + last_i;
+                            } else {
+                                // Single-char whitespace followed by a word —
+                                // this shouldn't normally happen with tiktoken
+                                // patterns (the word alternative would have
+                                // consumed this position first), but if it
+                                // does, keep the full match to avoid an
+                                // empty piece.
+                            }
+                        }
+                    }
+
+                    f(&text[start..end]);
+                    // Guard against pathological zero-width matches.
+                    if end == pos {
+                        pos += 1;
+                    } else {
+                        pos = end;
+                    }
+                }
+            }
+            SplitEngine::Fancy(clones) => {
+                let regex = &clones[thread_index()];
+                for mat in regex.find_iter(text) {
+                    match mat {
+                        Ok(m) => f(m.as_str()),
+                        Err(_) => continue,
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The core BPE encoder/decoder.
 ///
 /// A `CoreBPE` owns the vocabulary, the compiled regex used to split text into
@@ -136,13 +301,13 @@ pub struct CoreBPE {
     special_tokens_encoder: HashMap<String, Rank>,
     /// Rank → special token bytes.
     special_tokens_decoder: HashMap<Rank, Vec<u8>>,
-    /// Pre-cloned regex instances, one per "thread slot". Indexed via
-    /// [`thread_index`]. Avoids contention on `fancy_regex`'s internal mutable
-    /// scratch state when the tokenizer is used from multiple threads.
-    regex_tls: Vec<Regex>,
+    /// Fast or fancy engine for splitting text into pieces.
+    split_engine: SplitEngine,
     /// Thread-local clones of the special-token regex. Empty if there are no
-    /// special tokens.
-    special_regex_tls: Vec<Regex>,
+    /// special tokens. Special-token patterns are always literal alternations,
+    /// so `fancy_regex` is fine here (and needed only for its `find_from_pos`
+    /// API which `regex` crate also provides but we keep symmetric).
+    special_regex_tls: Vec<FancyRegex>,
     /// Sorted vocabulary bytes, useful for prefix queries.
     sorted_token_bytes: Vec<Vec<u8>>,
 }
@@ -354,7 +519,9 @@ fn byte_pair_merge_large(ranks: &HashMap<Vec<u8>, Rank>, piece: &[u8]) -> Vec<Ra
 ///
 /// Returns `None` if `specials` is empty — callers should then skip the
 /// special-token scan entirely.
-fn build_special_regex(specials: &HashMap<String, Rank>) -> Result<Option<Regex>, BuildError> {
+fn build_special_regex(
+    specials: &HashMap<String, Rank>,
+) -> Result<Option<FancyRegex>, BuildError> {
     if specials.is_empty() {
         return Ok(None);
     }
@@ -364,7 +531,7 @@ fn build_special_regex(specials: &HashMap<String, Rank>) -> Result<Option<Regex>
         .map(|s| fancy_regex::escape(s).into_owned())
         .collect();
     let pattern = parts.join("|");
-    Ok(Some(Regex::new(&pattern)?))
+    Ok(Some(FancyRegex::new(&pattern)?))
 }
 
 // --- CoreBPE public API ------------------------------------------------------
@@ -383,7 +550,7 @@ impl CoreBPE {
         special_tokens_encoder: HashMap<String, Rank>,
         pattern: &str,
     ) -> Result<Self, BuildError> {
-        let regex = Regex::new(pattern)?;
+        let split_engine = SplitEngine::new(pattern)?;
         let decoder: HashMap<Rank, Vec<u8>> =
             encoder.iter().map(|(k, v)| (*v, k.clone())).collect();
         if decoder.len() != encoder.len() {
@@ -395,9 +562,7 @@ impl CoreBPE {
             .collect();
 
         let special_regex = build_special_regex(&special_tokens_encoder)?;
-
-        let regex_tls: Vec<Regex> = (0..MAX_NUM_THREADS).map(|_| regex.clone()).collect();
-        let special_regex_tls: Vec<Regex> = match special_regex {
+        let special_regex_tls: Vec<FancyRegex> = match special_regex {
             Some(r) => (0..MAX_NUM_THREADS).map(|_| r.clone()).collect(),
             None => Vec::new(),
         };
@@ -410,7 +575,7 @@ impl CoreBPE {
             decoder,
             special_tokens_encoder,
             special_tokens_decoder,
-            regex_tls,
+            split_engine,
             special_regex_tls,
             sorted_token_bytes,
         })
@@ -437,13 +602,19 @@ impl CoreBPE {
     }
 
     #[inline]
-    fn tl_regex(&self) -> &Regex {
-        &self.regex_tls[thread_index()]
+    fn tl_special_regex(&self) -> Option<&FancyRegex> {
+        self.special_regex_tls.get(thread_index())
     }
 
+    /// Emit the tokens produced by BPE-encoding one regex-split piece.
     #[inline]
-    fn tl_special_regex(&self) -> Option<&Regex> {
-        self.special_regex_tls.get(thread_index())
+    fn emit_piece(&self, piece: &[u8], out: &mut Vec<Rank>) {
+        // Whole-piece fast path: most regex splits are already full tokens.
+        if let Some(&token) = self.encoder.get(piece) {
+            out.push(token);
+            return;
+        }
+        out.extend(byte_pair_encode(piece, &self.encoder));
     }
 
     /// Encode ordinary text, ignoring special tokens entirely.
@@ -451,21 +622,10 @@ impl CoreBPE {
     /// Any special-token substrings in the input will be tokenized as regular
     /// text (this matches tiktoken's behavior).
     pub fn encode_ordinary(&self, text: &str) -> Vec<Rank> {
-        let regex = self.tl_regex();
         let mut ret = Vec::new();
-        for mat in regex.find_iter(text) {
-            let m = match mat {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-            let piece = m.as_str().as_bytes();
-            // Whole-piece fast path: most regex splits are already full tokens.
-            if let Some(&token) = self.encoder.get(piece) {
-                ret.push(token);
-                continue;
-            }
-            ret.extend(byte_pair_encode(piece, &self.encoder));
-        }
+        self.split_engine.find_pieces(text, |piece| {
+            self.emit_piece(piece.as_bytes(), &mut ret);
+        });
         ret
     }
 
@@ -479,7 +639,6 @@ impl CoreBPE {
             // No special tokens registered at all — just do ordinary encoding.
             None => return self.encode_ordinary(text),
         };
-        let regex = self.tl_regex();
 
         let mut ret = Vec::new();
         let mut start = 0usize;
@@ -504,18 +663,9 @@ impl CoreBPE {
             let end = next_special.map_or(text.len(), |(s, _)| s);
 
             // Encode the ordinary text between [start, end).
-            for mat in regex.find_iter(&text[start..end]) {
-                let m = match mat {
-                    Ok(m) => m,
-                    Err(_) => continue,
-                };
-                let piece = m.as_str().as_bytes();
-                if let Some(&token) = self.encoder.get(piece) {
-                    ret.push(token);
-                    continue;
-                }
-                ret.extend(byte_pair_encode(piece, &self.encoder));
-            }
+            self.split_engine.find_pieces(&text[start..end], |piece| {
+                self.emit_piece(piece.as_bytes(), &mut ret);
+            });
 
             // Emit the special token (if any) and advance.
             match next_special {
@@ -780,6 +930,56 @@ mod tests {
         let empty: HashSet<&str> = HashSet::new();
         let tokens = bpe.encode("ab<|eot|>cd", &empty);
         assert!(!tokens.contains(&999));
+    }
+
+    #[test]
+    fn fast_engine_kicks_in_on_tiktoken_patterns() {
+        // The o200k_base pattern contains `\s+(?!\S)` which fancy-regex can
+        // compile but regex crate cannot. The transformation should strip it
+        // and produce a Fast engine.
+        let o200k = r"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n/]*|\s*[\r\n]+|\s+(?!\S)|\s+";
+        let engine = SplitEngine::new(o200k).unwrap();
+        assert!(engine.is_fast(), "o200k_base should use fast engine");
+
+        // Simple pattern with no lookarounds should also use fast.
+        let simple = SplitEngine::new(r"\w+|\s+").unwrap();
+        assert!(simple.is_fast());
+    }
+
+    #[test]
+    fn whitespace_shrink_matches_tiktoken_behavior() {
+        // Build a toy BPE with a pattern that mimics the structure tiktoken
+        // uses: word with optional leading non-word char, or whitespace.
+        let mut encoder: HashMap<Vec<u8>, Rank> = HashMap::default();
+        for b in 0u8..=255 {
+            encoder.insert(vec![b], b as Rank);
+        }
+        // Inject a token for " hello" so we can detect the whitespace-attach
+        // behavior via the whole-piece fast path.
+        encoder.insert(b" hello".to_vec(), 1000);
+        encoder.insert(b"hello".to_vec(), 1001);
+
+        // Pattern mirrors tiktoken's shape: optional non-word + letters,
+        // then the `\s+(?!\S)|\s+` whitespace tail that exercises the
+        // fast-path shrink rule.
+        let pattern = r"[^\r\n\p{L}\p{N}]?\p{L}+|\s+(?!\S)|\s+";
+        let bpe = CoreBPE::new(encoder, HashMap::default(), pattern).unwrap();
+        assert!(bpe.split_engine.is_fast());
+
+        // "  hello" should tokenize as [" ", " hello"] — the first whitespace
+        // is a standalone piece (one space) and the second attaches to the
+        // following word as " hello".
+        let tokens = bpe.encode_ordinary("  hello");
+        assert_eq!(
+            tokens,
+            vec![b' ' as Rank, 1000],
+            "fast path should replicate `\\s+(?!\\S)` whitespace-shrink behavior"
+        );
+
+        // "hello " (trailing whitespace) should tokenize as ["hello", " "]
+        // — the trailing whitespace has no following word so it stays full.
+        let tokens = bpe.encode_ordinary("hello ");
+        assert_eq!(tokens, vec![1001, b' ' as Rank]);
     }
 
     #[test]

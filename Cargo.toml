@@ -31,6 +31,7 @@ python = ["dep:pyo3"]
 
 [dependencies]
 rustc-hash = "2"
+regex = "1.11"
 fancy-regex = "0.17"
 pyo3 = { version = "0.27.2", default-features = false, features = ["extension-module", "macros"], optional = true }
 
