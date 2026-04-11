@@ -77,13 +77,16 @@ jobs:
         shell: bash
         run: |
           python -m venv .venv
-          if [ -d ".venv/Scripts" ]; then
-            VENV_BIN="$PWD/.venv/Scripts"
-          else
-            VENV_BIN="$PWD/.venv/bin"
-          fi
-          echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
-          echo "$VENV_BIN" >> "$GITHUB_PATH"
+          python - <<'PY'
+          import os, sys
+          from pathlib import Path
+          venv = Path(".venv").resolve()
+          bin_dir = venv / ("Scripts" if os.name == "nt" else "bin")
+          with open(os.environ["GITHUB_ENV"], "a") as f:
+              f.write(f"VIRTUAL_ENV={venv}\n")
+          with open(os.environ["GITHUB_PATH"], "a") as f:
+              f.write(f"{bin_dir}\n")
+          PY
 
       - name: Install maturin & test deps
         run: |
