@@ -1,0 +1,57 @@
+[project]
+name = "riptoken"
+version = "0.1.0"
+description = "Fast BPE tokenizer for LLMs — a faster, drop-in compatible reimplementation of tiktoken"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Dae Choi", email = "daechoi70@gmail.com" }]
+keywords = ["tokenizer", "bpe", "llm", "tiktoken", "nlp", "openai"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Text Processing :: Linguistic",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/daechoi/riptoken"
+Repository = "https://github.com/daechoi/riptoken"
+Issues = "https://github.com/daechoi/riptoken/issues"
+Changelog = "https://github.com/daechoi/riptoken/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+    "tiktoken>=0.7",
+    "hypothesis>=6.0",
+]
+bench = [
+    "tiktoken>=0.7",
+]
+
+[build-system]
+build-backend = "maturin"
+requires = ["maturin>=1.5,<2.0"]
+
+[tool.maturin]
+features = ["python"]
+module-name = "riptoken._riptoken"
+python-source = "python"
+strip = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests/python"]

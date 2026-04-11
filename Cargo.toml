@@ -1,0 +1,45 @@
+[package]
+name = "riptoken"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Fast BPE tokenizer for LLMs — a faster, drop-in compatible reimplementation of tiktoken"
+license = "MIT"
+repository = "https://github.com/daechoi/riptoken"
+homepage = "https://github.com/daechoi/riptoken"
+documentation = "https://docs.rs/riptoken"
+readme = "README.md"
+keywords = ["tokenizer", "bpe", "llm", "tiktoken", "nlp"]
+categories = ["text-processing", "science", "parser-implementations"]
+authors = ["Dae Choi <daechoi70@gmail.com>"]
+exclude = [
+    "o200k_base.tiktoken",
+    "*.tiktoken",
+    ".venv/",
+    "dist/",
+    "tests/python/",
+    "scripts/",
+]
+
+[lib]
+name = "riptoken"
+crate-type = ["rlib", "cdylib"]
+
+[features]
+default = []
+python = ["dep:pyo3"]
+
+[dependencies]
+rustc-hash = "2"
+fancy-regex = "0.17"
+pyo3 = { version = "0.27.2", default-features = false, features = ["extension-module", "macros"], optional = true }
+
+[[bench]]
+name = "bpe"
+harness = false
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+strip = true
