@@ -1,6 +1,6 @@
 # riptoken
 
-**A fast BPE tokenizer for LLMs. Drop-in compatible with OpenAI's [`tiktoken`](https://github.com/openai/tiktoken), 1.8×–2.7× faster on realistic text.**
+**A fast BPE tokenizer for LLMs. Drop-in compatible with OpenAI's [`tiktoken`](https://github.com/openai/tiktoken), 2.4×–6.2× faster single-threaded and up to ~4× faster in parallel batch mode.**
 
 [![PyPI](https://img.shields.io/pypi/v/riptoken.svg)](https://pypi.org/project/riptoken/)
 [![Crates.io](https://img.shields.io/crates/v/riptoken.svg)](https://crates.io/crates/riptoken)
@@ -26,15 +26,31 @@ out ahead on every corpus tested.
 ## Benchmarks
 
 Apple Silicon (M-series), Python 3.13, `o200k_base` vocab, release builds of
-both libraries, outputs verified byte-identical.
+both libraries, outputs verified byte-identical. Median of 3 runs.
 
-| Corpus                 | Tokens  | riptoken (tok/s) | tiktoken (tok/s) | Speedup   |
-| ---------------------- | ------- | ---------------: | ---------------: | --------- |
-| English prose          |  40,001 |         8,557,965 |         3,158,249 | **2.71×** |
-| Python source code     |  72,501 |         6,653,380 |         2,705,474 | **2.46×** |
-| Rust source code       |  88,001 |         7,178,632 |         3,084,426 | **2.33×** |
-| Multilingual + emoji   |  85,600 |         6,805,565 |         3,631,832 | **1.87×** |
-| Random-ish bytes       | 120,000 |         8,840,042 |         4,365,504 | **2.02×** |
+### Single-threaded
+
+| Corpus                 |  Tokens | riptoken (tok/s) | tiktoken (tok/s) | Speedup   |
+| ---------------------- | ------: | ---------------: | ---------------: | --------- |
+| English prose          |  40,001 |       15,660,106 |        3,111,537 | **5.03×** |
+| Python source code     |  72,501 |       16,373,214 |        2,669,412 | **6.13×** |
+| Rust source code       |  88,001 |       18,028,338 |        3,066,479 | **5.88×** |
+| Multilingual + emoji   |  85,600 |        8,866,190 |        3,590,639 | **2.47×** |
+| Random-ish bytes       | 120,000 |       18,028,338 |        4,328,077 | **4.17×** |
+
+### Parallel batch (256 docs, rayon + GIL release)
+
+| Corpus                 |     Tokens | riptoken (tok/s) | tiktoken (tok/s) | Speedup   |
+| ---------------------- | ---------: | ---------------: | ---------------: | --------- |
+| English prose          | 10,240,256 |       33,966,313 |       13,783,321 | **2.51×** |
+| Python source code     | 18,560,256 |       43,965,336 |       11,430,058 | **3.86×** |
+| Rust source code       | 22,528,256 |       48,320,152 |       13,880,179 | **3.60×** |
+| Multilingual + emoji   | 21,913,600 |       31,110,914 |       15,041,445 | **2.03×** |
+| Random-ish bytes       | 30,720,000 |       46,700,000 |       18,188,264 | **2.56×** |
+
+Parallel batch scaling improves further on wider machines: on a 32-core
+Sapphire Rapids box, `o200k_base` throughput hits ~290 M tok/s (19× the
+single-threaded baseline).
 
 Reproduce with:
 
