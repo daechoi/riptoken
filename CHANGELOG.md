@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] — 2026-04-11
+
+Minor release. Closes the remaining tiktoken API surface gap by wrapping
+the Rust `CoreBPE` in a new Python `Encoding` class that forwards every
+non-hot-path attribute and method to the underlying `tiktoken.Encoding`.
+Code written against `tiktoken.Encoding` — `n_vocab`, `eot_token`,
+`special_tokens_set`, `encode_with_unstable`, `decode_single_token_bytes`,
+etc. — now works unchanged against a `riptoken.get_encoding` result.
+Also adds Python 3.14 to CI and the release wheels matrix.
+
+### Added
+
+- `riptoken.Encoding` — a drop-in replacement for `tiktoken.Encoding`.
+  Hot-path methods (`encode`, `encode_ordinary`, `decode`, `decode_bytes`,
+  `encode_batch`, `encode_ordinary_batch`) execute in riptoken's Rust
+  core and release the GIL; every other attribute falls through to the
+  wrapped `tiktoken.Encoding` via `__getattr__`. `get_encoding` and
+  `encoding_for_model` now return `Encoding` instances instead of bare
+  `CoreBPE` instances.
+- `encode` and `encode_batch` accept `allowed_special="all"` as a
+  sentinel meaning "every special token in the vocabulary", matching
+  tiktoken.
+- Python 3.14 support — added to the CI matrix and to the release
+  workflow's interpreter list for Linux and macOS wheel builds.
+
+### Changed
+
+- `n_vocab` is now a property (int), not a callable, matching tiktoken.
+  Code that called `enc.n_vocab()` needs to drop the parentheses.
+  `CoreBPE.n_vocab()` is unchanged for direct Rust-core users.
+
 ## [0.2.2] — 2026-04-11
 
 Patch release. Closes two tiktoken API compatibility gaps in the Python

@@ -74,4 +74,4 @@ def test_vocabulary_size_matches_tiktoken(
     o200k_bpe: "CoreBPE", tiktoken_o200k
 ) -> None:
     # tiktoken's n_vocab includes special tokens; so does ours.
-    assert o200k_bpe.n_vocab() == tiktoken_o200k.n_vocab
+    assert o200k_bpe.n_vocab == tiktoken_o200k.n_vocab

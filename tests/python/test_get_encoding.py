@@ -35,7 +35,7 @@ def test_get_encoding_parity_with_tiktoken(encoding_name: str) -> None:
         # first use; skip if the network or cache isn't available.
         pytest.skip(f"tiktoken.get_encoding({encoding_name!r}) failed: {e}")
     rip = riptoken.get_encoding(encoding_name)
-    assert rip.n_vocab() == tik.n_vocab
+    assert rip.n_vocab == tik.n_vocab
     for text in CORPUS:
         assert rip.encode_ordinary(text) == tik.encode_ordinary(text), (
             f"mismatch on {encoding_name!r} / {text!r}"
@@ -50,7 +50,7 @@ def test_encoding_for_model_parity_with_tiktoken() -> None:
     except Exception as e:
         pytest.skip(f"tiktoken.encoding_for_model('gpt-4o') failed: {e}")
     rip = riptoken.encoding_for_model("gpt-4o")
-    assert rip.n_vocab() == tik.n_vocab
+    assert rip.n_vocab == tik.n_vocab
     for text in CORPUS:
         assert rip.encode_ordinary(text) == tik.encode_ordinary(text)
 
