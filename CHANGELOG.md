@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.0] — 2026-04-11
 
+First stable public release. Published to
+[PyPI](https://pypi.org/project/riptoken/) and
+[crates.io](https://crates.io/crates/riptoken).
+
 ### Added
 
 - First public release. BPE tokenizer compatible with OpenAI's `tiktoken`
