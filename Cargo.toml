@@ -13,7 +13,6 @@ keywords = ["tokenizer", "bpe", "llm", "tiktoken", "nlp"]
 categories = ["text-processing", "science", "parser-implementations"]
 authors = ["Dae Choi <daechoi70@gmail.com>"]
 exclude = [
-    "o200k_base.tiktoken",
     "*.tiktoken",
     ".venv/",
     "dist/",

@@ -96,17 +96,8 @@ jobs:
       - name: Build extension
         run: maturin develop --features python --release
 
-      - name: Download o200k_base vocab
-        shell: bash
-        run: |
-          python -c "import tiktoken; enc=tiktoken.get_encoding('o200k_base'); print(enc.n_vocab)"
-          python -c "
-          import base64, tiktoken
-          enc = tiktoken.get_encoding('o200k_base')
-          with open('o200k_base.tiktoken', 'wb') as f:
-              for b, r in sorted(enc._mergeable_ranks.items(), key=lambda x: x[1]):
-                  f.write(base64.b64encode(b) + b' ' + str(r).encode() + b'\n')
-          "
+      - name: Warm tiktoken cache
+        run: python -c "import tiktoken; tiktoken.get_encoding('o200k_base')"
 
       - name: Run pytest
         run: pytest -q

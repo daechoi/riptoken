@@ -68,18 +68,10 @@ unless you are building the Python extension yourself.
 
 ```python
 import riptoken
-import tiktoken  # only for the vocabulary loader path
 
-# Load any tiktoken-format vocabulary.
-ranks = riptoken.load_tiktoken_bpe("o200k_base.tiktoken")
-special_tokens = {"<|endoftext|>": 199999, "<|endofprompt|>": 200018}
-pat = (
-    r"""[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?|"""
-    r"""[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?|"""
-    r"""\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n/]*|\s*[\r\n]+|\s+(?!\S)|\s+"""
-)
-
-enc = riptoken.CoreBPE(ranks, special_tokens, pat)
+# One-liner: load any tiktoken encoding by name or model.
+enc = riptoken.get_encoding("o200k_base")
+# or: enc = riptoken.encoding_for_model("gpt-4o")
 
 tokens = enc.encode_ordinary("Hello, world!")
 assert enc.decode_bytes(tokens) == b"Hello, world!"
@@ -88,8 +80,28 @@ assert enc.decode_bytes(tokens) == b"Hello, world!"
 tokens = enc.encode("Hi <|endoftext|>", allowed_special={"<|endoftext|>"})
 ```
 
-riptoken's `CoreBPE` has the same method surface as `tiktoken`'s core encoder.
-In most existing codebases the migration is a single import change.
+`riptoken.get_encoding` and `riptoken.encoding_for_model` are drop-in
+equivalents of the `tiktoken` helpers of the same name. They soft-depend
+on `tiktoken` to supply vocabulary files, regex patterns, and special-token
+maps (using tiktoken's on-disk cache at `~/.cache/tiktoken/`), then wrap
+them in riptoken's faster Rust core. Byte-identical output, single import
+change.
+
+If you'd rather skip the `tiktoken` dependency and load a `.tiktoken` file
+yourself:
+
+```python
+import riptoken
+
+ranks = riptoken.load_tiktoken_bpe("o200k_base.tiktoken")
+special_tokens = {"<|endoftext|>": 199999, "<|endofprompt|>": 200018}
+pat = (
+    r"""[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?|"""
+    r"""[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?|"""
+    r"""\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n/]*|\s*[\r\n]+|\s+(?!\S)|\s+"""
+)
+enc = riptoken.CoreBPE(ranks, special_tokens, pat)
+```
 
 ### Rust
 
@@ -131,10 +143,24 @@ optimizations:
 5. **Whole-piece fast path.** Before running BPE on any regex-split piece,
    we check whether the piece is already a full vocabulary entry. For common
    English text, this hits over 99 % of the time and skips BPE entirely.
-6. **Thread-local regex pool.** `fancy-regex` keeps mutable scratch state
-   inside each `Regex`; concurrent `find_iter` calls contend on it. We
-   pre-clone 128 regex instances and dispatch via a hashed thread id.
-7. **GIL release.** Every Python-facing encode/decode call is wrapped in
+6. **SIMD regex fast path.** Every stock tiktoken pattern (`gpt2`,
+   `r50k_base`, `p50k_base`, `cl100k_base`, `o200k_base`) compiles on the
+   `regex` crate's DFA/SIMD engine after a small peephole rewrite that
+   peels off the one lookaround feature they use (`\s+(?!\S)`) and
+   reproduces its semantics in Rust. Patterns we can't rewrite fall back
+   to `fancy-regex`.
+7. **Thread-local regex clones.** Both the fast and fancy engines hold
+   per-thread clones. `fancy-regex` keeps mutable scratch state inside
+   each `Regex`, and the `regex` crate uses an internal `Pool<Cache>`
+   guarded by a mutex — under high thread counts that pool becomes a
+   contention point. Per-thread clones get out of its way: on 32-core
+   Sapphire Rapids, parallel `o200k_base` batch encoding scales from
+   6.2× to 19× vs single-threaded.
+8. **Parallel batch API.** `encode_ordinary_batch` / `encode_batch` fan
+   out to rayon's global thread pool, so a batch of independent documents
+   encodes in parallel. The Python bindings release the GIL for the full
+   batch.
+9. **GIL release.** Every Python-facing encode/decode call is wrapped in
    `py.detach(|| ...)` so Python threads can make real forward progress.
 
 ## API
@@ -186,9 +212,10 @@ pytest
 python scripts/bench.py
 ```
 
-You will need `o200k_base.tiktoken` in the project root to run benchmarks and
-parity tests. Download it once from `tiktoken`'s public CDN or copy it out of
-your local tiktoken cache.
+The Python test suite and benchmark use `riptoken.get_encoding("o200k_base")`
+under the hood, which reads the vocabulary through `tiktoken` and its on-disk
+cache at `~/.cache/tiktoken/`. No local `.tiktoken` file is required — the
+first run downloads it automatically.
 
 ## Contributing
 

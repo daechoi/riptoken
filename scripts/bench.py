@@ -18,22 +18,7 @@ from dataclasses import dataclass
 
 import tiktoken
 
-from riptoken import CoreBPE, load_tiktoken_bpe
-
-# o200k_base regex pattern (copied from tiktoken's openai_public.py)
-PAT_STR = "|".join(
-    [
-        r"""[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?""",
-        r"""[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?""",
-        r"""\p{N}{1,3}""",
-        r""" ?[^\s\p{L}\p{N}]+[\r\n/]*""",
-        r"""\s*[\r\n]+""",
-        r"""\s+(?!\S)""",
-        r"""\s+""",
-    ]
-)
-
-SPECIAL_TOKENS = {"<|endoftext|>": 199999, "<|endofprompt|>": 200018}
+import riptoken
 
 
 # --- Corpora -----------------------------------------------------------------
@@ -132,9 +117,8 @@ CORPORA = [
 
 
 def main() -> None:
-    print("Loading o200k_base vocabulary...")
-    ranks = load_tiktoken_bpe("o200k_base.tiktoken")
-    rip = CoreBPE(ranks, SPECIAL_TOKENS, PAT_STR)
+    print("Loading o200k_base vocabulary via tiktoken...")
+    rip = riptoken.get_encoding("o200k_base")
     tik = tiktoken.get_encoding("o200k_base")
 
     N = 10

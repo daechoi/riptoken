@@ -1,8 +1,9 @@
 """Parity tests: riptoken output must match tiktoken byte-for-byte.
 
-These tests require both ``riptoken`` and ``tiktoken`` to be importable AND
-the ``o200k_base.tiktoken`` vocabulary file to be present in the project root.
-They are skipped otherwise.
+These tests require ``tiktoken`` to be importable; the ``o200k_bpe``
+fixture loads the encoder via ``riptoken.get_encoding("o200k_base")``,
+which goes through tiktoken's on-disk cache so no local
+``.tiktoken`` file is needed.
 """
 
 from __future__ import annotations
