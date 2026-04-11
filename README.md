@@ -66,7 +66,7 @@ python scripts/bench.py
 pip install riptoken
 ```
 
-Pre-built wheels are published for CPython 3.9–3.13 on Linux (x86_64, aarch64),
+Pre-built wheels are published for CPython 3.9–3.14 on Linux (x86_64, aarch64),
 macOS (x86_64, arm64), and Windows (x86_64).
 
 ### Rust
@@ -90,18 +90,26 @@ enc = riptoken.get_encoding("o200k_base")
 # or: enc = riptoken.encoding_for_model("gpt-4o")
 
 tokens = enc.encode_ordinary("Hello, world!")
-assert enc.decode_bytes(tokens) == b"Hello, world!"
+assert enc.decode(tokens) == "Hello, world!"
 
 # With allowed special tokens
 tokens = enc.encode("Hi <|endoftext|>", allowed_special={"<|endoftext|>"})
+
+# Every tiktoken.Encoding attribute works transparently
+enc.n_vocab           # 200_019
+enc.eot_token         # 199_999
+enc.special_tokens_set
 ```
 
 `riptoken.get_encoding` and `riptoken.encoding_for_model` are drop-in
-equivalents of the `tiktoken` helpers of the same name. They soft-depend
-on `tiktoken` to supply vocabulary files, regex patterns, and special-token
-maps (using tiktoken's on-disk cache at `~/.cache/tiktoken/`), then wrap
-them in riptoken's faster Rust core. Byte-identical output, single import
-change.
+equivalents of the `tiktoken` helpers of the same name. They return a
+`riptoken.Encoding` wrapper whose hot-path methods (`encode`,
+`encode_ordinary`, `decode`, `decode_bytes`, and their batch variants)
+execute in riptoken's faster Rust core; every other attribute and method
+— `n_vocab`, `eot_token`, `special_tokens_set`, `encode_with_unstable`,
+etc. — forwards transparently to the underlying `tiktoken.Encoding`.
+Vocabulary files and regex patterns come from tiktoken's on-disk cache
+at `~/.cache/tiktoken/`. Byte-identical output, single import change.
 
 If you'd rather skip the `tiktoken` dependency and load a `.tiktoken` file
 yourself:
@@ -181,17 +189,30 @@ optimizations:
 
 ## API
 
-### Python (`riptoken.CoreBPE`)
+### Python (`riptoken.Encoding`)
+
+`get_encoding` / `encoding_for_model` return a `riptoken.Encoding`.
+Hot-path methods run in the Rust core and release the GIL; every other
+attribute forwards to the underlying `tiktoken.Encoding` via
+`__getattr__`, so the full `tiktoken.Encoding` API is available.
 
 | Method                                         | Returns                    |
 | ---------------------------------------------- | -------------------------- |
 | `encode_ordinary(text)`                        | `list[int]`                |
-| `encode(text, allowed_special)`                | `list[int]`                |
-| `encode_single_token(piece: bytes)`            | `int`                      |
+| `encode(text, allowed_special=None)`           | `list[int]`                |
+| `encode_ordinary_batch(texts)`                 | `list[list[int]]`          |
+| `encode_batch(texts, allowed_special=None)`    | `list[list[int]]`          |
+| `decode(tokens)`                               | `str`                      |
 | `decode_bytes(tokens)`                         | `bytes`                    |
-| `decode_single_token_bytes(token)`             | `bytes`                    |
-| `n_vocab()`                                    | `int`                      |
-| `token_byte_values()`                          | `list[bytes]`              |
+| `n_vocab`, `eot_token`, `special_tokens_set`, … | forwarded to `tiktoken`    |
+
+`allowed_special` accepts a `set[str]` or the sentinel `"all"`.
+
+You can also construct a `riptoken.CoreBPE` directly from a `.tiktoken`
+file via `load_tiktoken_bpe` if you want to avoid the `tiktoken`
+dependency. `CoreBPE` exposes the same hot-path methods as `Encoding`
+plus `encode_single_token`, `decode_single_token_bytes`, `n_vocab()`,
+and `token_byte_values()`.
 
 ### Rust (`riptoken::CoreBPE`)
 
