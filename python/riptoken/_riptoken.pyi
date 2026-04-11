@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Set
+from collections.abc import Sequence, Set
 
 class CoreBPE:
     """Core BPE encoder/decoder. Backed by a Rust implementation.
@@ -52,6 +52,24 @@ class CoreBPE:
         Special tokens in ``allowed_special`` are emitted as their assigned
         ranks. Special tokens NOT in the set are tokenized as ordinary text.
         Releases the GIL during encoding.
+        """
+
+    def encode_ordinary_batch(self, texts: Sequence[str]) -> list[list[int]]:
+        """Encode many texts in parallel, ignoring special tokens.
+
+        Each text is tokenized on a rayon worker thread using the global
+        rayon pool. Level of parallelism is controlled by the
+        ``RAYON_NUM_THREADS`` environment variable. Results preserve input
+        order. Releases the GIL for the duration of the call.
+        """
+
+    def encode_batch(
+        self, texts: Sequence[str], allowed_special: Set[str]
+    ) -> list[list[int]]:
+        """Encode many texts in parallel with the given allowed special tokens.
+
+        See :meth:`encode` for the per-text semantics and
+        :meth:`encode_ordinary_batch` for the parallelism model.
         """
 
     def encode_single_token(self, piece: bytes) -> int:

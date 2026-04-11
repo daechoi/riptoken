@@ -33,11 +33,20 @@ python = ["dep:pyo3"]
 rustc-hash = "2"
 regex = "1.11"
 fancy-regex = "0.17"
+rayon = "1.10"
 pyo3 = { version = "0.27.2", default-features = false, features = ["extension-module", "macros"], optional = true }
+
+[dev-dependencies]
+base64 = "0.22"
 
 [[bench]]
 name = "bpe"
 harness = false
+
+[profile.profiling]
+inherits = "release"
+debug = 2
+strip = false
 
 [profile.release]
 lto = "fat"

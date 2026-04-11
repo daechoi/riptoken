@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `CoreBPE::encode_ordinary_batch` and `CoreBPE::encode_batch` for parallel
+  batch encoding, fanning out to rayon's global thread pool. Python bindings
+  (`encode_ordinary_batch`, `encode_batch`) release the GIL for the full batch.
+
+### Changed
+
+- The SIMD fast-path engine now uses the `regex` crate for tiktoken-style
+  patterns whose lookaround can be peeled off (all of `cl100k_base`,
+  `o200k_base`, `p50k_base`). The `\s+(?!\S)` whitespace-shrink rule is
+  reproduced in Rust code, producing byte-identical output to tiktoken.
+  Patterns with other lookarounds fall back to `fancy-regex` as before.
+- Fast-path regex now uses per-thread clones (same pattern as the fancy
+  engine) so the DFA cache pool is not contended at high thread counts.
+  On 32-core Sapphire Rapids, parallel throughput improved from
+  ~95M tps (6.2×) to ~290M tps (19×) for o200k_base batch encode.
+- Micro-optimizations: pre-allocated output vectors sized from input length,
+  `#[inline(always)]` on the hot `rank_of` helper, zero-allocation
+  `HashMap::get(&[u8])` lookup replacing the prior `.to_vec()`.
+
 ## [0.1.0] — 2026-04-11
 
 First stable public release. Published to

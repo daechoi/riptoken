@@ -138,7 +138,7 @@ def main() -> None:
     tik = tiktoken.get_encoding("o200k_base")
 
     N = 10
-    print(f"\nBenchmark: {N} runs per corpus. All outputs verified byte-identical.\n")
+    print(f"\nSingle-threaded benchmark: {N} runs per corpus. All outputs verified byte-identical.\n")
 
     header = f"{'corpus':<28} {'tokens':>10} {'rip (ms)':>10} {'tik (ms)':>10} {'rip tps':>14} {'tik tps':>14} {'speedup':>10}"
     print(header)
@@ -173,6 +173,45 @@ def main() -> None:
         tik_tps = (n_tok * N) / tik_s
         print(
             f"{c.name:<28} {n_tok:>10,} {rip_s * 100:>9.2f} {tik_s * 100:>9.2f} "
+            f"{rip_tps:>14,.0f} {tik_tps:>14,.0f} {tik_s / rip_s:>9.2f}x"
+        )
+
+    # --- Parallel batch benchmark --------------------------------------------
+    #
+    # Simulates a bulk workload: many independent documents encoded at once.
+    # riptoken uses its built-in `encode_ordinary_batch` which releases the
+    # GIL and fans out to rayon's global thread pool. tiktoken's built-in
+    # parallel path is `encode_ordinary_batch` too (threaded over a small
+    # pool). Identical input, identical output.
+
+    BATCH_SIZE = 256
+    print(f"\nParallel batch benchmark: batch of {BATCH_SIZE} documents per corpus.\n")
+
+    header = f"{'corpus':<28} {'tokens':>10} {'rip (ms)':>10} {'tik (ms)':>10} {'rip tps':>14} {'tik tps':>14} {'speedup':>10}"
+    print(header)
+    print("-" * len(header))
+
+    for c in CORPORA:
+        docs = [c.text] * BATCH_SIZE
+
+        # Warm up + parity check on first doc.
+        rip_batch = rip.encode_ordinary_batch(docs)
+        assert all(d == rip_batch[0] for d in rip_batch)
+        assert rip_batch[0] == tik.encode_ordinary(c.text)
+
+        start = time.perf_counter()
+        rip.encode_ordinary_batch(docs)
+        rip_s = time.perf_counter() - start
+
+        start = time.perf_counter()
+        tik.encode_ordinary_batch(docs)
+        tik_s = time.perf_counter() - start
+
+        n_tok = len(rip_batch[0]) * BATCH_SIZE
+        rip_tps = n_tok / rip_s
+        tik_tps = n_tok / tik_s
+        print(
+            f"{c.name:<28} {n_tok:>10,} {rip_s * 1000:>9.2f} {tik_s * 1000:>9.2f} "
             f"{rip_tps:>14,.0f} {tik_tps:>14,.0f} {tik_s / rip_s:>9.2f}x"
         )
 

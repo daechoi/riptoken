@@ -182,13 +182,14 @@ fn next_char_is_non_whitespace(text: &str, pos: usize) -> bool {
 
 /// The pattern-matching engine used to split text into pieces before BPE.
 ///
-/// The fast path (`regex` crate) is SIMD-accelerated and has no per-call
-/// scratch state — one instance is shared across all threads. The fancy path
-/// (`fancy-regex`) supports lookarounds but has thread-local scratch state,
-/// so we clone it per thread slot to avoid contention.
+/// Both the fast and fancy engines hold per-thread-slot clones. The regex
+/// crate's `Regex` is `Send + Sync` but internally uses a `Pool<Cache>` of
+/// DFA scratch buffers guarded by a mutex — under high thread counts that
+/// pool becomes a contention point, so we give each thread its own instance.
+/// The clones are cheap (regex state is Arc-shared internally).
 enum SplitEngine {
-    /// SIMD-accelerated, finite-automaton regex. `Send + Sync`, no clones needed.
-    Fast(FastRegex),
+    /// SIMD-accelerated, finite-automaton regex. One clone per thread slot.
+    Fast(Vec<FastRegex>),
     /// Backtracking regex with lookaround support. One clone per thread slot.
     Fancy(Vec<FancyRegex>),
 }
@@ -198,7 +199,8 @@ impl SplitEngine {
     /// back to fancy-regex if the pattern can't be transformed.
     fn new(pattern: &str) -> Result<Self, BuildError> {
         if let Some(fast) = try_transform_for_fast_regex(pattern) {
-            return Ok(SplitEngine::Fast(fast));
+            let clones: Vec<FastRegex> = (0..MAX_NUM_THREADS).map(|_| fast.clone()).collect();
+            return Ok(SplitEngine::Fast(clones));
         }
         let fancy = FancyRegex::new(pattern)?;
         let clones: Vec<FancyRegex> = (0..MAX_NUM_THREADS).map(|_| fancy.clone()).collect();
@@ -218,7 +220,8 @@ impl SplitEngine {
     #[inline]
     fn find_pieces<F: FnMut(&str)>(&self, text: &str, mut f: F) {
         match self {
-            SplitEngine::Fast(regex) => {
+            SplitEngine::Fast(clones) => {
+                let regex = &clones[thread_index()];
                 let mut pos = 0;
                 while pos < text.len() {
                     let m = match regex.find_at(text, pos) {
@@ -319,7 +322,7 @@ pub struct CoreBPE {
 /// `HashMap<Vec<u8>, Rank>::get` accepts any `Q: ?Sized` where
 /// `Vec<u8>: Borrow<Q>`, and `Vec<u8>` implements `Borrow<[u8]>`, so this
 /// avoids the `.to_vec()` allocation the naive implementation does.
-#[inline]
+#[inline(always)]
 fn rank_of(ranks: &HashMap<Vec<u8>, Rank>, piece: &[u8]) -> Rank {
     ranks.get(piece).copied().unwrap_or(Rank::MAX)
 }
@@ -400,10 +403,14 @@ fn byte_pair_encode(piece: &[u8], ranks: &HashMap<Vec<u8>, Rank>) -> Vec<Rank> {
 
     if piece.len() < LARGE_PIECE_THRESHOLD {
         let positions = byte_pair_merge(ranks, piece);
-        positions
-            .windows(2)
-            .map(|w| rank_of(ranks, &piece[w[0].0..w[1].0]))
-            .collect()
+        // `positions` has n+1 entries and yields n tokens (windows of 2).
+        let mut out: Vec<Rank> = Vec::with_capacity(positions.len() - 1);
+        out.extend(
+            positions
+                .windows(2)
+                .map(|w| rank_of(ranks, &piece[w[0].0..w[1].0])),
+        );
+        out
     } else {
         byte_pair_merge_large(ranks, piece)
     }
@@ -622,11 +629,44 @@ impl CoreBPE {
     /// Any special-token substrings in the input will be tokenized as regular
     /// text (this matches tiktoken's behavior).
     pub fn encode_ordinary(&self, text: &str) -> Vec<Rank> {
-        let mut ret = Vec::new();
+        // Rough pre-allocation: ~4 bytes per token is the average for English
+        // + code at the o200k_base vocab size. Overshoot a little to avoid the
+        // last realloc and undershoot hurts less than it helps (reallocs are
+        // cheap for the final doubling).
+        let mut ret = Vec::with_capacity(text.len() / 3 + 1);
         self.split_engine.find_pieces(text, |piece| {
             self.emit_piece(piece.as_bytes(), &mut ret);
         });
         ret
+    }
+
+    /// Encode many ordinary texts in parallel using rayon.
+    ///
+    /// Each text is tokenized on a rayon worker thread; the returned vector
+    /// preserves input order. Uses the global rayon pool, so the level of
+    /// parallelism is controlled by `RAYON_NUM_THREADS` or
+    /// `rayon::ThreadPoolBuilder`.
+    pub fn encode_ordinary_batch(&self, texts: &[&str]) -> Vec<Vec<Rank>> {
+        use rayon::prelude::*;
+        texts
+            .par_iter()
+            .map(|t| self.encode_ordinary(t))
+            .collect()
+    }
+
+    /// Encode many texts in parallel using rayon, honoring special tokens.
+    ///
+    /// See [`CoreBPE::encode`] for the special-token semantics.
+    pub fn encode_batch(
+        &self,
+        texts: &[&str],
+        allowed_special: &HashSet<&str>,
+    ) -> Vec<Vec<Rank>> {
+        use rayon::prelude::*;
+        texts
+            .par_iter()
+            .map(|t| self.encode(t, allowed_special))
+            .collect()
     }
 
     /// Encode text, allowing a specific set of special tokens.
@@ -760,6 +800,29 @@ impl CoreBPE {
         py.detach(|| {
             let allowed_refs: HashSet<&str> = allowed_special.iter().map(|s| s.as_str()).collect();
             self.encode(text, &allowed_refs)
+        })
+    }
+
+    #[pyo3(name = "encode_ordinary_batch")]
+    fn py_encode_ordinary_batch(&self, py: Python<'_>, texts: Vec<String>) -> Vec<Vec<Rank>> {
+        py.detach(|| {
+            let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
+            self.encode_ordinary_batch(&refs)
+        })
+    }
+
+    #[pyo3(name = "encode_batch")]
+    fn py_encode_batch(
+        &self,
+        py: Python<'_>,
+        texts: Vec<String>,
+        allowed_special: HashSet<String>,
+    ) -> Vec<Vec<Rank>> {
+        py.detach(|| {
+            let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
+            let allowed_refs: HashSet<&str> =
+                allowed_special.iter().map(|s| s.as_str()).collect();
+            self.encode_batch(&refs, &allowed_refs)
         })
     }
 
@@ -980,6 +1043,20 @@ mod tests {
         // — the trailing whitespace has no following word so it stays full.
         let tokens = bpe.encode_ordinary("hello ");
         assert_eq!(tokens, vec![1001, b' ' as Rank]);
+    }
+
+    #[test]
+    fn batch_encode_matches_sequential() {
+        let bpe = toy_bpe();
+        let texts = vec!["hello", "hello world", "the lazy fox"];
+        let batch = bpe.encode_ordinary_batch(&texts);
+        let seq: Vec<Vec<Rank>> = texts.iter().map(|t| bpe.encode_ordinary(t)).collect();
+        assert_eq!(batch, seq);
+
+        // encode_batch with empty allowed set should equal encode_ordinary_batch
+        let empty: HashSet<&str> = HashSet::new();
+        let batch_sp = bpe.encode_batch(&texts, &empty);
+        assert_eq!(batch_sp, seq);
     }
 
     #[test]
