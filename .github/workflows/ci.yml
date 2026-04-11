@@ -73,6 +73,18 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Create virtualenv
+        shell: bash
+        run: |
+          python -m venv .venv
+          if [ -d ".venv/Scripts" ]; then
+            VENV_BIN="$PWD/.venv/Scripts"
+          else
+            VENV_BIN="$PWD/.venv/bin"
+          fi
+          echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
+          echo "$VENV_BIN" >> "$GITHUB_PATH"
+
       - name: Install maturin & test deps
         run: |
           python -m pip install --upgrade pip
