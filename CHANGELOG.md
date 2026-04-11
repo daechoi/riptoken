@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-04-11
+
+Patch release. Closes two tiktoken API compatibility gaps in the Python
+bindings so that code written against `tiktoken.Encoding` — including
+the examples in Sebastian Raschka's *Build a Large Language Model
+(From Scratch)* — runs unchanged against a `riptoken.get_encoding`
+instance.
+
+### Added
+
+- `CoreBPE.decode(tokens)` — returns a Python `str`, matching
+  `tiktoken.Encoding.decode`. Invalid UTF-8 sequences (which can occur
+  mid-stream when a multi-byte character spans a token boundary) are
+  replaced with U+FFFD, matching tiktoken's default
+  `errors="replace"` behavior. The existing `decode_bytes` method is
+  unchanged and remains the right choice for strict / streaming
+  decoding.
+
+### Fixed
+
+- `CoreBPE.encode(text)` now works without an explicit
+  `allowed_special` argument, matching tiktoken. Previously
+  `allowed_special` was a required positional parameter, so
+  `tokenizer.encode(raw_text)` raised a `TypeError`. The parameter is
+  now optional and defaults to an empty set (no special tokens
+  recognized), and can still be passed as a positional or keyword
+  argument. `CoreBPE.encode_batch` received the same treatment.
+
 ## [0.2.1] — 2026-04-11
 
 Patch release. Makes `tiktoken` a required runtime dependency so that

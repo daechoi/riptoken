@@ -885,10 +885,16 @@ impl CoreBPE {
         py.detach(|| self.encode_ordinary(text))
     }
 
-    #[pyo3(name = "encode")]
-    fn py_encode(&self, py: Python<'_>, text: &str, allowed_special: HashSet<String>) -> Vec<Rank> {
+    #[pyo3(name = "encode", signature = (text, allowed_special = None))]
+    fn py_encode(
+        &self,
+        py: Python<'_>,
+        text: &str,
+        allowed_special: Option<HashSet<String>>,
+    ) -> Vec<Rank> {
         py.detach(|| {
-            let allowed_refs: HashSet<&str> = allowed_special.iter().map(|s| s.as_str()).collect();
+            let allowed = allowed_special.unwrap_or_default();
+            let allowed_refs: HashSet<&str> = allowed.iter().map(|s| s.as_str()).collect();
             self.encode(text, &allowed_refs)
         })
     }
@@ -901,16 +907,17 @@ impl CoreBPE {
         })
     }
 
-    #[pyo3(name = "encode_batch")]
+    #[pyo3(name = "encode_batch", signature = (texts, allowed_special = None))]
     fn py_encode_batch(
         &self,
         py: Python<'_>,
         texts: Vec<String>,
-        allowed_special: HashSet<String>,
+        allowed_special: Option<HashSet<String>>,
     ) -> Vec<Vec<Rank>> {
         py.detach(|| {
             let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
-            let allowed_refs: HashSet<&str> = allowed_special.iter().map(|s| s.as_str()).collect();
+            let allowed = allowed_special.unwrap_or_default();
+            let allowed_refs: HashSet<&str> = allowed.iter().map(|s| s.as_str()).collect();
             self.encode_batch(&refs, &allowed_refs)
         })
     }
@@ -929,6 +936,20 @@ impl CoreBPE {
     ) -> pyo3::Bound<'py, pyo3::types::PyBytes> {
         let bytes = py.detach(|| self.decode_bytes(&tokens));
         pyo3::types::PyBytes::new(py, &bytes)
+    }
+
+    /// Decode tokens into a Python `str`, matching `tiktoken.Encoding.decode`.
+    ///
+    /// Invalid UTF-8 sequences (which can occur mid-stream when a multi-byte
+    /// character spans a token boundary) are replaced with U+FFFD, matching
+    /// tiktoken's default `errors="replace"` behavior. For strict decoding or
+    /// raw bytes, use [`decode_bytes`].
+    #[pyo3(name = "decode")]
+    fn py_decode(&self, py: Python<'_>, tokens: Vec<Rank>) -> String {
+        py.detach(|| {
+            let bytes = self.decode_bytes(&tokens);
+            String::from_utf8_lossy(&bytes).into_owned()
+        })
     }
 
     #[pyo3(name = "decode_single_token_bytes")]
