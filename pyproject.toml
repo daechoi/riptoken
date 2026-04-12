@@ -1,6 +1,6 @@
 [project]
 name = "riptoken"
-version = "0.2.3"
+version = "0.2.4"
 description = "Fast BPE tokenizer for LLMs — a faster, drop-in compatible reimplementation of tiktoken"
 readme = "README.md"
 requires-python = ">=3.9"

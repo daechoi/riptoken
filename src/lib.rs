@@ -175,12 +175,20 @@ fn try_transform_for_fast_regex(pattern: &str) -> Option<(FastRegex, ShrinkMode)
     //    runs; in the gpt2 family there is no such alternative and shrink
     //    must fire on any whitespace run.
     //
-    //    Order matters: the more specific `\s+` form must be tried before
-    //    the bare `\s` form, otherwise we'd leave a trailing `+` behind.
-    let shrink_mode = if pattern.contains(r"\s+(?!\S)|\s+") {
-        ShrinkMode::PlainOnly
-    } else if pattern.contains(r"\s+(?!\S)|\s") {
-        ShrinkMode::Unified
+    //    The shrink family is determined by the presence of a dedicated
+    //    newline alternative like `\s*[\r\n]` or `\s*[\r\n]+`: patterns
+    //    that have one (o200k/cl100k) use `PlainOnly` so that
+    //    newline-containing matches from that alternative aren't shrunk;
+    //    patterns without one (gpt2/r50k/p50k) use `Unified` so the
+    //    shrink fires on all whitespace runs including newlines.
+    let has_lookahead_ws = pattern.contains(r"\s+(?!\S)");
+    let has_newline_alt = pattern.contains(r"\s*[\r\n]");
+    let shrink_mode = if has_lookahead_ws {
+        if has_newline_alt {
+            ShrinkMode::PlainOnly
+        } else {
+            ShrinkMode::Unified
+        }
     } else {
         ShrinkMode::None
     };

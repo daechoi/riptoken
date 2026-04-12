@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.4] — 2026-04-12
+
+Bugfix release. Fixes incorrect tokenization on the `cl100k_base`
+encoding for text containing `\r\n` sequences. All five stock tiktoken
+encodings are now verified byte-identical against 23.8 MB of real-world
+internet text (Project Gutenberg, Linux/CPython/Rust source, multilingual
+Wikipedia).
+
+### Fixed
+
+- `cl100k_base` produced wrong tokens around `\r\n`: the SIMD
+  fast-path whitespace-shrink rule incorrectly classified `cl100k_base`
+  as `Unified` mode instead of `PlainOnly`, causing `\r\n` matches from
+  the `\s*[\r\n]` alternative to be split into separate `\r` and `\n`
+  pieces. The fix detects the presence of a dedicated newline alternative
+  (`\s*[\r\n]`) in the pattern rather than relying on the `\s+` vs `\s`
+  suffix to distinguish the two families.
+
+### Added
+
+- `scripts/parity_internet.py` — downloads large real-world corpora
+  (Gutenberg books, kernel source, multilingual Wikipedia) and verifies
+  byte-identical output against tiktoken across all encodings.
+
 ## [0.2.3] — 2026-04-11
 
 Minor release. Closes the remaining tiktoken API surface gap by wrapping

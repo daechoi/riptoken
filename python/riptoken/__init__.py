@@ -44,7 +44,7 @@ from typing import Any, Iterable, Union
 
 from riptoken._riptoken import CoreBPE
 
-__version__ = "0.2.3"
+__version__ = "0.2.4"
 __all__ = [
     "CoreBPE",
     "Encoding",
