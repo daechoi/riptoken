@@ -37,10 +37,10 @@ use fancy_regex::Regex as FancyRegex;
 use regex::Regex as FastRegex;
 use regex::RegexBuilder as FastRegexBuilder;
 use regex_automata::{
+    Input,
     dfa::{dense, regex::Regex as DfaRegex},
     nfa::thompson,
     util::syntax,
-    Input,
 };
 use rustc_hash::{FxHashMap as HashMap, FxHasher};
 use std::collections::HashSet;
@@ -57,7 +57,8 @@ mod prebuilt {
 
     // Raw patterns exactly as tiktoken provides them. gpt2, r50k_base,
     // p50k_base, and p50k_edit all share the same pattern.
-    const GPT2_RAW: &str = r"'(?:[sdmt]|ll|ve|re)| ?\p{L}++| ?\p{N}++| ?[^\s\p{L}\p{N}]++|\s++$|\s+(?!\S)|\s";
+    const GPT2_RAW: &str =
+        r"'(?:[sdmt]|ll|ve|re)| ?\p{L}++| ?\p{N}++| ?[^\s\p{L}\p{N}]++|\s++$|\s+(?!\S)|\s";
     const CL100K_RAW: &str = r"'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}++|\p{N}{1,3}+| ?[^\s\p{L}\p{N}]++[\r\n]*+|\s++$|\s*[\r\n]|\s+(?!\S)|\s";
     const O200K_RAW: &str = concat!(
         r"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?",
@@ -1282,7 +1283,8 @@ mod tests {
             "o200k_base stock pattern should use prebuilt DFA"
         );
 
-        let gpt2_raw = r"'(?:[sdmt]|ll|ve|re)| ?\p{L}++| ?\p{N}++| ?[^\s\p{L}\p{N}]++|\s++$|\s+(?!\S)|\s";
+        let gpt2_raw =
+            r"'(?:[sdmt]|ll|ve|re)| ?\p{L}++| ?\p{N}++| ?[^\s\p{L}\p{N}]++|\s++$|\s+(?!\S)|\s";
         let engine = SplitEngine::new(gpt2_raw).unwrap();
         assert!(
             engine.is_precompiled(),

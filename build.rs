@@ -74,8 +74,8 @@ mod precompile {
 
     pub fn run() {
         let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-        let target_endian = env::var("CARGO_CFG_TARGET_ENDIAN")
-            .unwrap_or_else(|_| "little".to_string());
+        let target_endian =
+            env::var("CARGO_CFG_TARGET_ENDIAN").unwrap_or_else(|_| "little".to_string());
 
         for (name, raw_pattern) in STOCK_PATTERNS {
             let transformed = match transform_pattern(raw_pattern) {
@@ -89,10 +89,7 @@ mod precompile {
             let dfa = match DfaRegex::builder()
                 .syntax(syntax::Config::new().unicode(true).utf8(true))
                 .thompson(thompson::Config::new())
-                .dense(
-                    dense::Config::new()
-                        .start_kind(regex_automata::dfa::StartKind::Unanchored),
-                )
+                .dense(dense::Config::new().start_kind(regex_automata::dfa::StartKind::Unanchored))
                 .build(&transformed)
             {
                 Ok(dfa) => dfa,

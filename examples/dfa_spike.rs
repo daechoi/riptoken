@@ -20,10 +20,10 @@
 use regex::Regex as LazyRegex;
 use regex::RegexBuilder as LazyRegexBuilder;
 use regex_automata::{
+    Anchored, Input,
     dfa::{dense, regex::Regex as DfaRegex},
     nfa::thompson,
     util::syntax,
-    Anchored, Input,
 };
 use std::time::Instant;
 
@@ -259,11 +259,7 @@ fn main() {
                     // Show first few differences.
                     let max_diff = 5;
                     let mut shown = 0;
-                    for (i, (d, l)) in dense_spans
-                        .iter()
-                        .zip(lazy_spans.iter())
-                        .enumerate()
-                    {
+                    for (i, (d, l)) in dense_spans.iter().zip(lazy_spans.iter()).enumerate() {
                         if d != l && shown < max_diff {
                             println!("    match[{i}]: dense={d:?} vs lazy={l:?}");
                             shown += 1;
