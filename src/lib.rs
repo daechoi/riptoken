@@ -35,6 +35,7 @@
 
 use fancy_regex::Regex as FancyRegex;
 use regex::Regex as FastRegex;
+use regex::RegexBuilder as FastRegexBuilder;
 use rustc_hash::{FxHashMap as HashMap, FxHasher};
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
@@ -232,7 +233,18 @@ fn try_transform_for_fast_regex(pattern: &str) -> Option<(FastRegex, ShrinkMode)
     let stripped = range_possessive.replace_all(&stripped, "$1").into_owned();
     // 4. Try to compile with the regex crate. Unicode property classes like
     //    `\p{L}`, `\p{N}` are supported by default.
-    let regex = FastRegex::new(&stripped).ok()?;
+    //
+    //    The default DFA cache is ~2 MB. Tiktoken patterns with many Unicode
+    //    property classes (`\p{Lu}`, `\p{Ll}`, `\p{Lo}`, etc.) generate large
+    //    DFA state tables when processing mixed-script text (e.g. Japanese
+    //    Wikipedia with interleaved CJK, Latin, and markup). At ~110 K bytes
+    //    the default cache overflows and the engine falls back to the NFA,
+    //    causing an ~8× cliff. Raising the limit to 32 MB keeps the DFA hot
+    //    for realistic workloads.
+    let regex = FastRegexBuilder::new(&stripped)
+        .dfa_size_limit(32 * (1 << 20))
+        .build()
+        .ok()?;
     Some((regex, shrink_mode))
 }
 
