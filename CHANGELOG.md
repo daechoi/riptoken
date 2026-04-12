@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-04-12
+
+Performance release. Eliminates the ~55 ms lazy-DFA cold-start on
+Unicode-heavy text by pre-compiling fully-materialized dense DFAs for
+all stock tiktoken patterns at build time. Construction time is unchanged;
+every encode call is now the fast path from the first invocation.
+
+### Added
+
+- **Pre-compiled dense DFAs.** Stock tiktoken patterns (`gpt2`,
+  `r50k_base`, `p50k_base`, `p50k_edit`, `cl100k_base`, `o200k_base`)
+  are compiled into dense DFAs at build time via `regex-automata` and
+  embedded in the binary. At runtime, stock patterns are detected by
+  exact string match and the pre-built DFA is deserialized at near-zero
+  cost — no lazy state-building on the first call.
+- `precompiled-dfa` Cargo feature (default on). Disable with
+  `--no-default-features` for smaller binaries at the cost of a
+  first-call warm-up.
+- `build.rs` — compiles and serializes forward + reverse dense DFAs for
+  each stock pattern, with correct endianness for cross-compilation via
+  `CARGO_CFG_TARGET_ENDIAN`.
+- `examples/dfa_spike.rs` — measurement spike that reports dense/sparse
+  DFA sizes and build times for each stock pattern.
+- New `PrecompiledDfa` variant in the internal `SplitEngine` enum. The
+  dense DFA has no mutable state, so one instance is shared across all
+  threads without per-thread cloning.
+
+### Changed
+
+- Engine selection priority is now: pre-built DFA (stock patterns) →
+  eager dense DFA build (non-stock) → lazy DFA → fancy-regex.
+- Pattern transformation logic extracted into a shared `transform_pattern`
+  function, reused by both the lazy-DFA and dense-DFA builders.
+- Whitespace-shrink post-processing extracted into `apply_shrink` helper,
+  shared across the `PrecompiledDfa` and `Fast` engine variants.
+- `regex-automata = "0.4"` added as a direct dependency (previously only
+  a transitive dependency via `regex`).
+
+### Performance
+
+First-call latency on 141 K character CJK text, `o200k_base`:
+
+| Metric               | v0.2.4 (lazy DFA) | v0.3.0 (precompiled) |
+| -------------------- | -----------------:| --------------------:|
+| Construction         |          ~200 ms  |            ~210 ms   |
+| First encode (cold)  |           ~55 ms  |           **~5.7 ms**|
+| Second encode (warm) |            ~8 ms  |           **~5.7 ms**|
+
 ## [0.2.4] — 2026-04-12
 
 Bugfix release. Fixes incorrect tokenization on the `cl100k_base`
@@ -202,5 +250,11 @@ builds of both libraries. Vocab: `o200k_base`.
 | Multilingual + emoji   | 85,600   | 6.8M         | 3.6M         | 1.87×   |
 | Random-ish bytes       | 120,000  | 8.8M         | 4.4M         | 2.02×   |
 
-[Unreleased]: https://github.com/daechoi/riptoken/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/daechoi/riptoken/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/daechoi/riptoken/compare/v0.2.4...v0.3.0
+[0.2.4]: https://github.com/daechoi/riptoken/compare/v0.2.3...v0.2.4
+[0.2.3]: https://github.com/daechoi/riptoken/compare/v0.2.2...v0.2.3
+[0.2.2]: https://github.com/daechoi/riptoken/compare/v0.2.1...v0.2.2
+[0.2.1]: https://github.com/daechoi/riptoken/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/daechoi/riptoken/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/daechoi/riptoken/releases/tag/v0.1.0
