@@ -265,6 +265,7 @@ dependencies = [
  "pyo3",
  "rayon",
  "regex",
+ "regex-automata",
  "rustc-hash",
 ]
 

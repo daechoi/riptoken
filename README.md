@@ -167,19 +167,19 @@ optimizations:
 5. **Whole-piece fast path.** Before running BPE on any regex-split piece,
    we check whether the piece is already a full vocabulary entry. For common
    English text, this hits over 99 % of the time and skips BPE entirely.
-6. **SIMD regex fast path.** Every stock tiktoken pattern (`gpt2`,
-   `r50k_base`, `p50k_base`, `cl100k_base`, `o200k_base`) compiles on the
-   `regex` crate's DFA/SIMD engine after a small peephole rewrite that
-   peels off the one lookaround feature they use (`\s+(?!\S)`) and
-   reproduces its semantics in Rust. Patterns we can't rewrite fall back
-   to `fancy-regex`.
-7. **Thread-local regex clones.** Both the fast and fancy engines hold
-   per-thread clones. `fancy-regex` keeps mutable scratch state inside
-   each `Regex`, and the `regex` crate uses an internal `Pool<Cache>`
-   guarded by a mutex — under high thread counts that pool becomes a
-   contention point. Per-thread clones get out of its way: on 32-core
-   Sapphire Rapids, parallel `o200k_base` batch encoding scales from
-   6.2× to 19× vs single-threaded.
+6. **Pre-compiled dense DFA.** Stock tiktoken patterns (`gpt2`,
+   `r50k_base`, `p50k_base`, `cl100k_base`, `o200k_base`) are compiled
+   into fully-materialized dense DFAs at build time via `regex-automata`.
+   All states are computed upfront and embedded in the binary — zero lazy
+   building at search time, eliminating the ~55 ms cold-start penalty the
+   `regex` crate's lazy DFA incurs on large Unicode patterns. The
+   `precompiled-dfa` Cargo feature (on by default) controls this; disable
+   it for smaller binaries at the cost of a first-call warm-up.
+7. **Immutable shared regex.** The pre-compiled dense DFA has no mutable
+   state, so a single instance is shared across all threads — no
+   per-thread clones needed. For non-stock patterns and the `fancy-regex`
+   fallback, per-thread clones are still used to avoid mutex contention
+   on internal scratch buffers.
 8. **Parallel batch API.** `encode_ordinary_batch` / `encode_batch` fan
    out to rayon's global thread pool, so a batch of independent documents
    encodes in parallel. The Python bindings release the GIL for the full

@@ -25,15 +25,21 @@ name = "riptoken"
 crate-type = ["rlib", "cdylib"]
 
 [features]
-default = []
+default = ["precompiled-dfa"]
+precompiled-dfa = []
 python = ["dep:pyo3"]
 
 [dependencies]
 rustc-hash = "2"
 regex = "1.11"
+regex-automata = "0.4"
 fancy-regex = "0.17"
 rayon = "1.10"
 pyo3 = { version = "0.27.2", default-features = false, features = ["extension-module", "macros"], optional = true }
+
+[build-dependencies]
+regex = "1.11"
+regex-automata = "0.4"
 
 [dev-dependencies]
 base64 = "0.22"

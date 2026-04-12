@@ -36,12 +36,85 @@
 use fancy_regex::Regex as FancyRegex;
 use regex::Regex as FastRegex;
 use regex::RegexBuilder as FastRegexBuilder;
+use regex_automata::{
+    dfa::{dense, regex::Regex as DfaRegex},
+    nfa::thompson,
+    util::syntax,
+    Input,
+};
 use rustc_hash::{FxHashMap as HashMap, FxHasher};
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
+
+// --- Build-time pre-compiled DFAs --------------------------------------------
+
+#[cfg(feature = "precompiled-dfa")]
+mod prebuilt {
+    use super::*;
+
+    // Raw patterns exactly as tiktoken provides them. gpt2, r50k_base,
+    // p50k_base, and p50k_edit all share the same pattern.
+    const GPT2_RAW: &str = r"'(?:[sdmt]|ll|ve|re)| ?\p{L}++| ?\p{N}++| ?[^\s\p{L}\p{N}]++|\s++$|\s+(?!\S)|\s";
+    const CL100K_RAW: &str = r"'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}++|\p{N}{1,3}+| ?[^\s\p{L}\p{N}]++[\r\n]*+|\s++$|\s*[\r\n]|\s+(?!\S)|\s";
+    const O200K_RAW: &str = concat!(
+        r"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?",
+        r"|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?",
+        r"|\p{N}{1,3}",
+        r"| ?[^\s\p{L}\p{N}]+[\r\n/]*",
+        r"|\s*[\r\n]+",
+        r"|\s+(?!\S)|\s+",
+    );
+
+    /// Force 4-byte alignment for `include_bytes!` data so that
+    /// `dense::DFA::from_bytes` can reinterpret the slice as `&[u32]`.
+    #[repr(C)]
+    struct AlignAs<Align, Bytes: ?Sized> {
+        _align: [Align; 0],
+        bytes: Bytes,
+    }
+
+    macro_rules! include_dfa {
+        ($path:expr) => {{
+            const ALIGNED: &AlignAs<u32, [u8]> = &AlignAs {
+                _align: [],
+                bytes: *include_bytes!($path),
+            };
+            &ALIGNED.bytes
+        }};
+    }
+
+    static GPT2_FWD: &[u8] = include_dfa!(concat!(env!("OUT_DIR"), "/gpt2_fwd.dfa"));
+    static GPT2_REV: &[u8] = include_dfa!(concat!(env!("OUT_DIR"), "/gpt2_rev.dfa"));
+    static CL100K_FWD: &[u8] = include_dfa!(concat!(env!("OUT_DIR"), "/cl100k_fwd.dfa"));
+    static CL100K_REV: &[u8] = include_dfa!(concat!(env!("OUT_DIR"), "/cl100k_rev.dfa"));
+    static O200K_FWD: &[u8] = include_dfa!(concat!(env!("OUT_DIR"), "/o200k_fwd.dfa"));
+    static O200K_REV: &[u8] = include_dfa!(concat!(env!("OUT_DIR"), "/o200k_rev.dfa"));
+
+    /// Try to load a pre-built DFA for a known stock tiktoken pattern.
+    ///
+    /// Returns `None` if the pattern doesn't match any stock pattern or if
+    /// deserialization fails.
+    pub(crate) fn try_load(pattern: &str) -> Option<(DfaRegex, ShrinkMode)> {
+        let (fwd_bytes, rev_bytes, shrink_mode) = if pattern == GPT2_RAW {
+            (GPT2_FWD, GPT2_REV, ShrinkMode::Unified)
+        } else if pattern == CL100K_RAW {
+            (CL100K_FWD, CL100K_REV, ShrinkMode::PlainOnly)
+        } else if pattern == O200K_RAW {
+            (O200K_FWD, O200K_REV, ShrinkMode::PlainOnly)
+        } else {
+            return None;
+        };
+        let (fwd, _) = dense::DFA::from_bytes(fwd_bytes).ok()?;
+        let (rev, _) = dense::DFA::from_bytes(rev_bytes).ok()?;
+        Some((
+            DfaRegex::builder().build_from_dfas(fwd.to_owned(), rev.to_owned()),
+            shrink_mode,
+        ))
+    }
+}
 
 /// Integer rank of a token in the BPE vocabulary.
 ///
@@ -148,21 +221,14 @@ enum ShrinkMode {
     Unified,
 }
 
-/// Try to rewrite a tiktoken-style pattern into a form that the SIMD-accelerated
-/// `regex` crate can compile.
+/// Strip lookarounds and possessive quantifiers from a tiktoken-style pattern
+/// so it can be compiled by a pure-DFA engine (`regex` crate or
+/// `regex-automata` dense DFA).
 ///
-/// The only transformation applied is stripping the `\s+(?!\S)` alternative,
-/// which appears in every stock tiktoken encoding. Its purpose — "leave the
-/// last whitespace of a run for the next word's leading-space prefix" — is
-/// replicated in Rust code by [`SplitEngine::find_pieces`] when running on
-/// the fast path, using the returned [`ShrinkMode`] to select which
-/// whitespace runs the shrink should fire on.
-///
-/// Returns `Some((regex, mode))` if the pattern compiles successfully with
-/// the `regex` crate after transformation, or `None` if the pattern contains
-/// other lookarounds (or features) that regex can't handle — in which case
-/// the caller falls back to `fancy-regex`.
-fn try_transform_for_fast_regex(pattern: &str) -> Option<(FastRegex, ShrinkMode)> {
+/// Returns `Some((transformed, shrink_mode))` if the pattern is eligible for
+/// the fast (non-backtracking) path, or `None` if it contains features that
+/// require a full backtracking engine.
+fn transform_pattern(pattern: &str) -> Option<(String, ShrinkMode)> {
     // 1. Collapse the whitespace-run tail and classify the pattern family.
     //    Every stock tiktoken pattern ends with one of two shapes:
     //       ...|\s*[\r\n]+|\s+(?!\S)|\s+   (o200k/cl100k-style)
@@ -231,21 +297,43 @@ fn try_transform_for_fast_regex(pattern: &str) -> Option<(FastRegex, ShrinkMode)
         .replace("*+", "*");
     let range_possessive = FastRegex::new(r"(\{\d+(?:,\d*)?\})\+").ok()?;
     let stripped = range_possessive.replace_all(&stripped, "$1").into_owned();
-    // 4. Try to compile with the regex crate. Unicode property classes like
-    //    `\p{L}`, `\p{N}` are supported by default.
-    //
-    //    The default DFA cache is ~2 MB. Tiktoken patterns with many Unicode
-    //    property classes (`\p{Lu}`, `\p{Ll}`, `\p{Lo}`, etc.) generate large
-    //    DFA state tables when processing mixed-script text (e.g. Japanese
-    //    Wikipedia with interleaved CJK, Latin, and markup). At ~110 K bytes
-    //    the default cache overflows and the engine falls back to the NFA,
-    //    causing an ~8× cliff. Raising the limit to 32 MB keeps the DFA hot
-    //    for realistic workloads.
-    let regex = FastRegexBuilder::new(&stripped)
+    Some((stripped, shrink_mode))
+}
+
+/// Try to rewrite a tiktoken-style pattern into a form that the SIMD-accelerated
+/// `regex` crate can compile (lazy DFA).
+///
+/// Returns `Some((regex, mode))` if the pattern compiles successfully with
+/// the `regex` crate after transformation, or `None` if the pattern contains
+/// other lookarounds (or features) that regex can't handle — in which case
+/// the caller falls back to `fancy-regex`.
+fn try_transform_for_fast_regex(pattern: &str) -> Option<(FastRegex, ShrinkMode)> {
+    let (transformed, shrink_mode) = transform_pattern(pattern)?;
+    let regex = FastRegexBuilder::new(&transformed)
         .dfa_size_limit(32 * (1 << 20))
         .build()
         .ok()?;
     Some((regex, shrink_mode))
+}
+
+/// Try to build a fully pre-compiled dense DFA for the pattern.
+///
+/// Unlike the lazy DFA in `try_transform_for_fast_regex`, this materializes
+/// all states upfront — zero cold-start at search time, and the resulting
+/// `DfaRegex` has no mutable state so it can be shared across threads without
+/// cloning.
+///
+/// Returns `None` if the pattern can't be transformed or the DFA build fails
+/// (e.g. the state table is too large).
+fn try_build_precompiled_dfa(pattern: &str) -> Option<(DfaRegex, ShrinkMode)> {
+    let (transformed, shrink_mode) = transform_pattern(pattern)?;
+    let dfa = DfaRegex::builder()
+        .syntax(syntax::Config::new().unicode(true).utf8(true))
+        .thompson(thompson::Config::new())
+        .dense(dense::Config::new().start_kind(regex_automata::dfa::StartKind::Unanchored))
+        .build(&transformed)
+        .ok()?;
+    Some((dfa, shrink_mode))
 }
 
 /// True if `s` consists entirely of whitespace with no `\n` or `\r`.
@@ -284,16 +372,40 @@ fn next_char_is_non_whitespace(text: &str, pos: usize) -> bool {
     }
 }
 
-/// The pattern-matching engine used to split text into pieces before BPE.
+/// Apply the `\s+(?!\S)` whitespace-shrink rule, returning the adjusted end.
 ///
-/// Both the fast and fancy engines hold per-thread-slot clones. The regex
-/// crate's `Regex` is `Send + Sync` but internally uses a `Pool<Cache>` of
-/// DFA scratch buffers guarded by a mutex — under high thread counts that
-/// pool becomes a contention point, so we give each thread its own instance.
-/// The clones are cheap (regex state is Arc-shared internally).
+/// If the matched piece is a whitespace run (per `shrink_mode`) and the
+/// character immediately after it is non-whitespace, shrink by one character
+/// so that trailing whitespace can attach to the following word.
+#[inline]
+fn apply_shrink(text: &str, start: usize, end: usize, shrink_mode: ShrinkMode) -> usize {
+    let piece = &text[start..end];
+    let should_shrink = match shrink_mode {
+        ShrinkMode::None => false,
+        ShrinkMode::PlainOnly => is_plain_whitespace_run(piece),
+        ShrinkMode::Unified => is_whitespace_run(piece),
+    };
+    if should_shrink && end < text.len() && next_char_is_non_whitespace(text, end) {
+        if let Some((last_i, _)) = piece.char_indices().next_back() {
+            if last_i > 0 {
+                return start + last_i;
+            }
+        }
+    }
+    end
+}
+
+/// The pattern-matching engine used to split text into pieces before BPE.
 enum SplitEngine {
-    /// SIMD-accelerated, finite-automaton regex. One clone per thread slot,
-    /// plus a [`ShrinkMode`] selecting how to emulate `\s+(?!\S)` in Rust.
+    /// Pre-compiled dense DFA — all states materialized upfront, zero
+    /// cold-start penalty. The `DfaRegex` has no mutable state, so one
+    /// instance is shared across all threads without cloning.
+    PrecompiledDfa {
+        dfa_regex: DfaRegex,
+        shrink_mode: ShrinkMode,
+    },
+    /// SIMD-accelerated lazy DFA. One clone per thread slot, plus a
+    /// [`ShrinkMode`] selecting how to emulate `\s+(?!\S)` in Rust.
     Fast {
         clones: Vec<FastRegex>,
         shrink_mode: ShrinkMode,
@@ -303,9 +415,27 @@ enum SplitEngine {
 }
 
 impl SplitEngine {
-    /// Build an engine for `pattern`. Attempts the fast path first and falls
-    /// back to fancy-regex if the pattern can't be transformed.
+    /// Build an engine for `pattern`.
+    ///
+    /// Priority: pre-built DFA (stock patterns) → eager DFA build →
+    /// lazy DFA → fancy-regex.
     fn new(pattern: &str) -> Result<Self, BuildError> {
+        // 1. Try pre-built DFA from build.rs (zero cost, stock patterns only).
+        #[cfg(feature = "precompiled-dfa")]
+        if let Some((dfa_regex, shrink_mode)) = prebuilt::try_load(pattern) {
+            return Ok(SplitEngine::PrecompiledDfa {
+                dfa_regex,
+                shrink_mode,
+            });
+        }
+        // 2. Try eager dense DFA build (non-stock patterns).
+        if let Some((dfa_regex, shrink_mode)) = try_build_precompiled_dfa(pattern) {
+            return Ok(SplitEngine::PrecompiledDfa {
+                dfa_regex,
+                shrink_mode,
+            });
+        }
+        // 3. Try lazy DFA.
         if let Some((fast, shrink_mode)) = try_transform_for_fast_regex(pattern) {
             let clones: Vec<FastRegex> = (0..MAX_NUM_THREADS).map(|_| fast.clone()).collect();
             return Ok(SplitEngine::Fast {
@@ -313,24 +443,59 @@ impl SplitEngine {
                 shrink_mode,
             });
         }
+        // 4. Fallback: fancy-regex with lookaround support.
         let fancy = FancyRegex::new(pattern)?;
         let clones: Vec<FancyRegex> = (0..MAX_NUM_THREADS).map(|_| fancy.clone()).collect();
         Ok(SplitEngine::Fancy(clones))
     }
 
-    /// True if this engine took the fast path. Useful for tests and stats.
+    /// True if this engine uses a non-backtracking path (precompiled or lazy DFA).
     #[cfg(test)]
     fn is_fast(&self) -> bool {
-        matches!(self, SplitEngine::Fast { .. })
+        matches!(
+            self,
+            SplitEngine::PrecompiledDfa { .. } | SplitEngine::Fast { .. }
+        )
+    }
+
+    /// True if this engine uses a pre-compiled dense DFA (zero cold-start).
+    #[cfg(all(test, feature = "precompiled-dfa"))]
+    fn is_precompiled(&self) -> bool {
+        matches!(self, SplitEngine::PrecompiledDfa { .. })
     }
 
     /// Iterate the pieces of `text`, invoking `f` with each piece as a `&str`.
     ///
-    /// On the fast path, applies the `\s+(?!\S)` whitespace-shrink rule in
+    /// On the fast paths, applies the `\s+(?!\S)` whitespace-shrink rule in
     /// Rust so that output matches tiktoken exactly.
     #[inline]
     fn find_pieces<F: FnMut(&str)>(&self, text: &str, mut f: F) {
         match self {
+            SplitEngine::PrecompiledDfa {
+                dfa_regex,
+                shrink_mode,
+            } => {
+                let haystack = text.as_bytes();
+                let mut pos = 0;
+                while pos < haystack.len() {
+                    let input = Input::new(haystack).range(pos..);
+                    let m = match dfa_regex.find(input) {
+                        Some(m) => m,
+                        None => break,
+                    };
+                    if m.start() > pos {
+                        pos = m.start();
+                    }
+                    let start = m.start();
+                    let end = apply_shrink(text, start, m.end(), *shrink_mode);
+                    f(&text[start..end]);
+                    if end == pos {
+                        pos += 1;
+                    } else {
+                        pos = end;
+                    }
+                }
+            }
             SplitEngine::Fast {
                 clones,
                 shrink_mode,
@@ -342,52 +507,12 @@ impl SplitEngine {
                         Some(m) => m,
                         None => break,
                     };
-                    // With well-formed tiktoken patterns every byte matches
-                    // some alternative, so the match should start exactly at
-                    // `pos`. If there's a gap, something unexpected happened
-                    // — skip over it to make progress.
                     if m.start() > pos {
                         pos = m.start();
                     }
                     let start = m.start();
-                    let mut end = m.end();
-                    let piece = &text[start..end];
-
-                    // Whitespace post-processing: `\s+(?!\S)` means "match
-                    // whitespace run but don't swallow the last whitespace
-                    // if a non-whitespace char follows". Replicate by
-                    // shrinking by one char in exactly that situation.
-                    //
-                    // Under `PlainOnly` (o200k/cl100k), the shrink fires
-                    // only on runs without newlines — matches containing
-                    // `\n`/`\r` came from the separate `\s*[\r\n]+`
-                    // alternative and are emitted whole. Under `Unified`
-                    // (gpt2/r50k/p50k), there is no such alternative, so
-                    // the shrink fires on every whitespace run.
-                    let should_shrink = match shrink_mode {
-                        ShrinkMode::None => false,
-                        ShrinkMode::PlainOnly => is_plain_whitespace_run(piece),
-                        ShrinkMode::Unified => is_whitespace_run(piece),
-                    };
-                    if should_shrink && end < text.len() && next_char_is_non_whitespace(text, end) {
-                        // Find the byte offset of the last char in the piece.
-                        if let Some((last_i, _)) = piece.char_indices().next_back() {
-                            // Only shrink if the piece has more than one char.
-                            if last_i > 0 {
-                                end = start + last_i;
-                            } else {
-                                // Single-char whitespace followed by a word —
-                                // this shouldn't normally happen with tiktoken
-                                // patterns (the word alternative would have
-                                // consumed this position first), but if it
-                                // does, keep the full match to avoid an
-                                // empty piece.
-                            }
-                        }
-                    }
-
+                    let end = apply_shrink(text, start, m.end(), *shrink_mode);
                     f(&text[start..end]);
-                    // Guard against pathological zero-width matches.
                     if end == pos {
                         pos += 1;
                     } else {
@@ -1129,7 +1254,7 @@ mod tests {
     fn fast_engine_kicks_in_on_tiktoken_patterns() {
         // The o200k_base pattern contains `\s+(?!\S)` which fancy-regex can
         // compile but regex crate cannot. The transformation should strip it
-        // and produce a Fast engine.
+        // and produce a Fast engine (precompiled or lazy DFA).
         let o200k = r"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n/]*|\s*[\r\n]+|\s+(?!\S)|\s+";
         let engine = SplitEngine::new(o200k).unwrap();
         assert!(engine.is_fast(), "o200k_base should use fast engine");
@@ -1137,6 +1262,43 @@ mod tests {
         // Simple pattern with no lookarounds should also use fast.
         let simple = SplitEngine::new(r"\w+|\s+").unwrap();
         assert!(simple.is_fast());
+    }
+
+    #[test]
+    #[cfg(feature = "precompiled-dfa")]
+    fn prebuilt_dfa_used_for_stock_patterns() {
+        // Stock tiktoken patterns should hit the prebuilt DFA path.
+        let o200k_raw = concat!(
+            r"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?",
+            r"|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?",
+            r"|\p{N}{1,3}",
+            r"| ?[^\s\p{L}\p{N}]+[\r\n/]*",
+            r"|\s*[\r\n]+",
+            r"|\s+(?!\S)|\s+",
+        );
+        let engine = SplitEngine::new(o200k_raw).unwrap();
+        assert!(
+            engine.is_precompiled(),
+            "o200k_base stock pattern should use prebuilt DFA"
+        );
+
+        let gpt2_raw = r"'(?:[sdmt]|ll|ve|re)| ?\p{L}++| ?\p{N}++| ?[^\s\p{L}\p{N}]++|\s++$|\s+(?!\S)|\s";
+        let engine = SplitEngine::new(gpt2_raw).unwrap();
+        assert!(
+            engine.is_precompiled(),
+            "gpt2 stock pattern should use prebuilt DFA"
+        );
+
+        let cl100k_raw = r"'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}++|\p{N}{1,3}+| ?[^\s\p{L}\p{N}]++[\r\n]*+|\s++$|\s*[\r\n]|\s+(?!\S)|\s";
+        let engine = SplitEngine::new(cl100k_raw).unwrap();
+        assert!(
+            engine.is_precompiled(),
+            "cl100k_base stock pattern should use prebuilt DFA"
+        );
+
+        // Non-stock pattern still uses the fast path (eager DFA build).
+        let custom = SplitEngine::new(r"\w+|\s+").unwrap();
+        assert!(custom.is_fast(), "custom pattern should use fast engine");
     }
 
     #[test]
