@@ -402,7 +402,7 @@ enum SplitEngine {
     /// cold-start penalty. The `DfaRegex` has no mutable state, so one
     /// instance is shared across all threads without cloning.
     PrecompiledDfa {
-        dfa_regex: DfaRegex,
+        dfa_regex: Box<DfaRegex>,
         shrink_mode: ShrinkMode,
     },
     /// SIMD-accelerated lazy DFA. One clone per thread slot, plus a
@@ -425,14 +425,14 @@ impl SplitEngine {
         #[cfg(feature = "precompiled-dfa")]
         if let Some((dfa_regex, shrink_mode)) = prebuilt::try_load(pattern) {
             return Ok(SplitEngine::PrecompiledDfa {
-                dfa_regex,
+                dfa_regex: Box::new(dfa_regex),
                 shrink_mode,
             });
         }
         // 2. Try eager dense DFA build (non-stock patterns).
         if let Some((dfa_regex, shrink_mode)) = try_build_precompiled_dfa(pattern) {
             return Ok(SplitEngine::PrecompiledDfa {
-                dfa_regex,
+                dfa_regex: Box::new(dfa_regex),
                 shrink_mode,
             });
         }
