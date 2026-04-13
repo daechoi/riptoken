@@ -1,6 +1,6 @@
 # riptoken
 
-**A fast BPE tokenizer for LLMs. Drop-in compatible with OpenAI's [`tiktoken`](https://github.com/openai/tiktoken), 2.4×–6.2× faster single-threaded and up to ~4× faster in parallel batch mode.**
+**A fast BPE tokenizer for LLMs. Drop-in compatible with OpenAI's [`tiktoken`](https://github.com/openai/tiktoken), 2.4×–6.5× faster single-threaded and up to ~22× faster in parallel batch mode on wide machines.**
 
 [![PyPI](https://img.shields.io/pypi/v/riptoken.svg)](https://pypi.org/project/riptoken/)
 [![Crates.io](https://img.shields.io/crates/v/riptoken.svg)](https://crates.io/crates/riptoken)
@@ -25,32 +25,57 @@ out ahead on every corpus tested.
 
 ## Benchmarks
 
-Apple Silicon (M-series), Python 3.13, `o200k_base` vocab, release builds of
-both libraries, outputs verified byte-identical. Median of 3 runs.
+All benchmarks: `o200k_base` vocab, release builds, outputs verified
+byte-identical.
 
-### Single-threaded
+### Apple Silicon (M-series), Python 3.13
+
+#### Single-threaded
 
 | Corpus                 |  Tokens | riptoken (tok/s) | tiktoken (tok/s) | Speedup   |
 | ---------------------- | ------: | ---------------: | ---------------: | --------- |
-| English prose          |  40,001 |       15,660,106 |        3,111,537 | **5.03×** |
-| Python source code     |  72,501 |       16,373,214 |        2,669,412 | **6.13×** |
-| Rust source code       |  88,001 |       18,028,338 |        3,066,479 | **5.88×** |
-| Multilingual + emoji   |  85,600 |        8,866,190 |        3,590,639 | **2.47×** |
-| Random-ish bytes       | 120,000 |       18,028,338 |        4,328,077 | **4.17×** |
+| English prose          |  40,001 |       16,293,161 |        3,154,943 | **5.16×** |
+| Python source code     |  72,501 |       16,294,984 |        2,702,277 | **6.03×** |
+| Rust source code       |  88,001 |       18,431,909 |        3,050,831 | **6.04×** |
+| Multilingual + emoji   |  85,600 |        9,467,460 |        3,634,679 | **2.60×** |
+| Random-ish bytes       | 120,000 |       18,397,196 |        4,325,133 | **4.25×** |
 
-### Parallel batch (256 docs, rayon + GIL release)
+#### Parallel batch (256 docs, rayon + GIL release)
 
 | Corpus                 |     Tokens | riptoken (tok/s) | tiktoken (tok/s) | Speedup   |
 | ---------------------- | ---------: | ---------------: | ---------------: | --------- |
-| English prose          | 10,240,256 |       33,966,313 |       13,783,321 | **2.51×** |
-| Python source code     | 18,560,256 |       43,965,336 |       11,430,058 | **3.86×** |
-| Rust source code       | 22,528,256 |       48,320,152 |       13,880,179 | **3.60×** |
-| Multilingual + emoji   | 21,913,600 |       31,110,914 |       15,041,445 | **2.03×** |
-| Random-ish bytes       | 30,720,000 |       46,700,000 |       18,188,264 | **2.56×** |
+| English prose          | 10,240,256 |       31,587,392 |       13,305,166 | **2.37×** |
+| Python source code     | 18,560,256 |       40,671,916 |       11,512,182 | **3.53×** |
+| Rust source code       | 22,528,256 |       47,642,701 |       13,573,170 | **3.51×** |
+| Multilingual + emoji   | 21,913,600 |       29,356,351 |       15,049,425 | **1.95×** |
+| Random-ish bytes       | 30,720,000 |       47,077,613 |       17,109,835 | **2.75×** |
 
-Parallel batch scaling improves further on wider machines: on a 32-core
-Sapphire Rapids box, `o200k_base` throughput hits ~290 M tok/s (19× the
-single-threaded baseline).
+### 32-core Sapphire Rapids (Linux), Python 3.12
+
+#### Single-threaded
+
+| Corpus                 |  Tokens | riptoken (tok/s) | tiktoken (tok/s) | Speedup   |
+| ---------------------- | ------: | ---------------: | ---------------: | --------- |
+| English prose          |  40,001 |       11,452,863 |        2,061,672 | **5.56×** |
+| Python source code     |  72,501 |       11,287,635 |        1,796,196 | **6.28×** |
+| Rust source code       |  88,001 |       13,252,883 |        2,037,556 | **6.50×** |
+| Multilingual + emoji   |  85,600 |        5,544,698 |        2,309,829 | **2.40×** |
+| Random-ish bytes       | 120,000 |       13,342,255 |        2,931,637 | **4.55×** |
+
+#### Parallel batch (256 docs, rayon + GIL release)
+
+| Corpus                 |     Tokens | riptoken (tok/s) | tiktoken (tok/s) | Speedup    |
+| ---------------------- | ---------: | ---------------: | ---------------: | ---------- |
+| English prose          | 10,240,256 |       27,306,398 |        7,451,179 | **3.66×**  |
+| Python source code     | 18,560,256 |       31,016,281 |       10,601,406 | **2.93×**  |
+| Rust source code       | 22,528,256 |       35,756,270 |        1,590,601 | **22.48×** |
+| Multilingual + emoji   | 21,913,600 |       30,151,253 |        6,763,520 | **4.46×**  |
+| Random-ish bytes       | 30,720,000 |       37,719,358 |       14,034,414 | **2.69×**  |
+
+On the 32-core box, tiktoken's parallel batch path hits severe DFA cache pool
+contention — most visible on Rust source code where its throughput drops to
+1.6 M tok/s (below its own single-threaded speed). riptoken's pre-compiled
+dense DFA has no mutable state, so it scales linearly with cores.
 
 Reproduce with:
 
