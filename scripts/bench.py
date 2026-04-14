@@ -122,14 +122,17 @@ def main() -> None:
     tik = tiktoken.get_encoding("o200k_base")
 
     N = 10
-    print(f"\nSingle-threaded benchmark: {N} runs per corpus. All outputs verified byte-identical.\n")
+    print(f"\nSingle-threaded benchmark: median of {N} runs per corpus. All outputs verified byte-identical.\n")
 
-    header = f"{'corpus':<28} {'tokens':>10} {'rip (ms)':>10} {'tik (ms)':>10} {'rip tps':>14} {'tik tps':>14} {'speedup':>10}"
+    header = (
+        f"{'corpus':<28} {'tokens':>10} {'rip (ms)':>10} {'tik (ms)':>10} "
+        f"{'rip tps':>14} {'tik tps':>14} {'speedup':>10}"
+    )
     print(header)
     print("-" * len(header))
 
     for c in CORPORA:
-        # warm up
+        # warm up + parity check
         rip_tokens = rip.encode_ordinary(c.text)
         tik_tokens = tik.encode_ordinary(c.text)
         if rip_tokens != tik_tokens:
@@ -142,22 +145,28 @@ def main() -> None:
                 f"first diff at token {first_diff}"
             )
 
-        start = time.perf_counter()
+        rip_times: list[float] = []
+        tik_times: list[float] = []
         for _ in range(N):
+            start = time.perf_counter()
             rip.encode_ordinary(c.text)
-        rip_s = time.perf_counter() - start
+            rip_times.append(time.perf_counter() - start)
 
-        start = time.perf_counter()
-        for _ in range(N):
+            start = time.perf_counter()
             tik.encode_ordinary(c.text)
-        tik_s = time.perf_counter() - start
+            tik_times.append(time.perf_counter() - start)
 
+        rip_times.sort()
+        tik_times.sort()
         n_tok = len(rip_tokens)
-        rip_tps = (n_tok * N) / rip_s
-        tik_tps = (n_tok * N) / tik_s
+
+        rip_med = rip_times[N // 2]
+        tik_med = tik_times[N // 2]
+        rip_tps = n_tok / rip_med
+        tik_tps = n_tok / tik_med
         print(
-            f"{c.name:<28} {n_tok:>10,} {rip_s * 100:>9.2f} {tik_s * 100:>9.2f} "
-            f"{rip_tps:>14,.0f} {tik_tps:>14,.0f} {tik_s / rip_s:>9.2f}x"
+            f"{c.name:<28} {n_tok:>10,} {rip_med * 1000:>9.2f} {tik_med * 1000:>9.2f} "
+            f"{rip_tps:>14,.0f} {tik_tps:>14,.0f} {tik_med / rip_med:>9.2f}x"
         )
 
     # --- Parallel batch benchmark --------------------------------------------
@@ -169,9 +178,14 @@ def main() -> None:
     # pool). Identical input, identical output.
 
     BATCH_SIZE = 256
-    print(f"\nParallel batch benchmark: batch of {BATCH_SIZE} documents per corpus.\n")
+    BATCH_RUNS = 10
+    print(f"\nParallel batch benchmark: batch of {BATCH_SIZE} documents, median of {BATCH_RUNS} runs.\n")
 
-    header = f"{'corpus':<28} {'tokens':>10} {'rip (ms)':>10} {'tik (ms)':>10} {'rip tps':>14} {'tik tps':>14} {'speedup':>10}"
+    header = (
+        f"{'corpus':<28} {'tokens':>10} {'rip (ms)':>10} {'tik (ms)':>10} "
+        f"{'rip tps':>14} {'tik tps':>14} {'speedup':>10}"
+        f"{'tik p99 (ms)':>14} {'rip p99 (ms)':>14}"
+    )
     print(header)
     print("-" * len(header))
 
@@ -183,20 +197,35 @@ def main() -> None:
         assert all(d == rip_batch[0] for d in rip_batch)
         assert rip_batch[0] == tik.encode_ordinary(c.text)
 
-        start = time.perf_counter()
-        rip.encode_ordinary_batch(docs)
-        rip_s = time.perf_counter() - start
+        rip_times: list[float] = []
+        tik_times: list[float] = []
+        for _ in range(BATCH_RUNS):
+            start = time.perf_counter()
+            rip.encode_ordinary_batch(docs)
+            rip_times.append(time.perf_counter() - start)
 
-        start = time.perf_counter()
-        tik.encode_ordinary_batch(docs)
-        tik_s = time.perf_counter() - start
+            start = time.perf_counter()
+            tik.encode_ordinary_batch(docs)
+            tik_times.append(time.perf_counter() - start)
 
+        rip_times.sort()
+        tik_times.sort()
         n_tok = len(rip_batch[0]) * BATCH_SIZE
-        rip_tps = n_tok / rip_s
-        tik_tps = n_tok / tik_s
+
+        # median (index 4 of 10)
+        rip_med = rip_times[BATCH_RUNS // 2]
+        tik_med = tik_times[BATCH_RUNS // 2]
+        rip_tps = n_tok / rip_med
+        tik_tps = n_tok / tik_med
+
+        # p99 ≈ worst of 10
+        rip_p99 = rip_times[-1]
+        tik_p99 = tik_times[-1]
+
         print(
-            f"{c.name:<28} {n_tok:>10,} {rip_s * 1000:>9.2f} {tik_s * 1000:>9.2f} "
-            f"{rip_tps:>14,.0f} {tik_tps:>14,.0f} {tik_s / rip_s:>9.2f}x"
+            f"{c.name:<28} {n_tok:>10,} {rip_med * 1000:>9.2f} {tik_med * 1000:>9.2f} "
+            f"{rip_tps:>14,.0f} {tik_tps:>14,.0f} {tik_med / rip_med:>9.2f}x"
+            f"{tik_p99 * 1000:>13.0f} {rip_p99 * 1000:>13.0f}"
         )
 
 
