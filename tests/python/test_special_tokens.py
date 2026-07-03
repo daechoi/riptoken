@@ -39,6 +39,26 @@ def test_encode_multiple_specials(o200k_bpe: "CoreBPE") -> None:
     assert 200018 in tokens
 
 
+def test_encode_allowed_special_all_allows_all(o200k_bpe: "CoreBPE") -> None:
+    text = "a <|endoftext|> b <|endofprompt|> c"
+    tokens = o200k_bpe.encode(text, allowed_special="all")
+    assert tokens == o200k_bpe.encode(
+        text, {"<|endoftext|>", "<|endofprompt|>"}
+    )
+    assert 199999 in tokens
+    assert 200018 in tokens
+
+
+def test_encode_batch_allowed_special_all_allows_all(o200k_bpe: "CoreBPE") -> None:
+    texts = ["a <|endoftext|>", "b <|endofprompt|>"]
+    tokens = o200k_bpe.encode_batch(texts, allowed_special="all")
+    assert tokens == o200k_bpe.encode_batch(
+        texts, {"<|endoftext|>", "<|endofprompt|>"}
+    )
+    assert 199999 in tokens[0]
+    assert 200018 in tokens[1]
+
+
 def test_encode_empty_string(o200k_bpe: "CoreBPE") -> None:
     assert o200k_bpe.encode_ordinary("") == []
     assert o200k_bpe.encode("", set()) == []

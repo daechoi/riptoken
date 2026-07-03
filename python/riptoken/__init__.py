@@ -163,7 +163,7 @@ class Encoding:
         if allowed_special is None:
             allowed: set[str] = set()
         elif allowed_special == "all":
-            allowed = set(self._tiktoken.special_tokens_set)
+            return self._core.encode_with_special_tokens(text)
         else:
             allowed = set(allowed_special)
         return self._core.encode(text, allowed)
@@ -187,13 +187,14 @@ class Encoding:
         Fans out to ``rayon``'s global thread pool, releasing the GIL for
         the full batch.
         """
+        text_list = list(texts)
         if allowed_special is None:
             allowed: set[str] = set()
         elif allowed_special == "all":
-            allowed = set(self._tiktoken.special_tokens_set)
+            return self._core.encode_with_special_tokens_batch(text_list)
         else:
             allowed = set(allowed_special)
-        return self._core.encode_batch(list(texts), allowed)
+        return self._core.encode_batch(text_list, allowed)
 
     def decode(self, tokens: list[int], errors: str = "replace") -> str:
         """Decode ``tokens`` into a string.

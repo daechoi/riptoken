@@ -244,7 +244,9 @@ and `token_byte_values()`.
 
 See [docs.rs/riptoken](https://docs.rs/riptoken) for full Rust API
 documentation. The same methods are available, returning `Vec<Rank>`, `Vec<u8>`,
-etc.
+etc. Use `CoreBPE::encode_with_special_tokens` when all registered special
+tokens should be allowed; it is equivalent to passing an allow set containing
+every special-token string, without materializing that set at the call site.
 
 ## Compatibility
 
