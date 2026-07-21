@@ -560,6 +560,12 @@ pub struct CoreBPE {
     sorted_token_bytes: Vec<Vec<u8>>,
 }
 
+#[derive(Clone, Copy)]
+enum SpecialPolicy<'set, 'token> {
+    AllowSet(&'set HashSet<&'token str>),
+    AllowAll,
+}
+
 // --- Core BPE merge algorithm -------------------------------------------------
 
 /// Compute the rank of a byte pair directly from a slice — no allocation.
@@ -905,11 +911,20 @@ impl CoreBPE {
             .collect()
     }
 
-    /// Encode text, allowing a specific set of special tokens.
+    /// Encode many texts in parallel using rayon, allowing every registered
+    /// special token.
     ///
-    /// Special tokens in `allowed_special` are emitted as their assigned ranks.
-    /// Special tokens NOT in `allowed_special` are tokenized as ordinary text.
-    pub fn encode(&self, text: &str, allowed_special: &HashSet<&str>) -> Vec<Rank> {
+    /// See [`CoreBPE::encode_with_special_tokens`] for the special-token
+    /// semantics.
+    pub fn encode_with_special_tokens_batch(&self, texts: &[&str]) -> Vec<Vec<Rank>> {
+        use rayon::prelude::*;
+        texts
+            .par_iter()
+            .map(|t| self.encode_with_special_tokens(t))
+            .collect()
+    }
+
+    fn encode_impl(&self, text: &str, special_policy: SpecialPolicy<'_, '_>) -> Vec<Rank> {
         let special_regex = match self.tl_special_regex() {
             Some(r) => r,
             // No special tokens registered at all — just do ordinary encoding.
@@ -925,7 +940,14 @@ impl CoreBPE {
             while search_from <= text.len() {
                 match special_regex.find_from_pos(text, search_from) {
                     Ok(Some(m)) => {
-                        if allowed_special.contains(&text[m.start()..m.end()]) {
+                        let piece = &text[m.start()..m.end()];
+                        let is_allowed = match special_policy {
+                            SpecialPolicy::AllowSet(allowed_special) => {
+                                allowed_special.contains(piece)
+                            }
+                            SpecialPolicy::AllowAll => true,
+                        };
+                        if is_allowed {
                             next_special = Some((m.start(), m.end()));
                             break;
                         }
@@ -956,6 +978,23 @@ impl CoreBPE {
             }
         }
         ret
+    }
+
+    /// Encode text, allowing a specific set of special tokens.
+    ///
+    /// Special tokens in `allowed_special` are emitted as their assigned ranks.
+    /// Special tokens NOT in `allowed_special` are tokenized as ordinary text.
+    pub fn encode(&self, text: &str, allowed_special: &HashSet<&str>) -> Vec<Rank> {
+        self.encode_impl(text, SpecialPolicy::AllowSet(allowed_special))
+    }
+
+    /// Encode text, allowing every special token registered in this encoder.
+    ///
+    /// This is equivalent to calling [`CoreBPE::encode`] with an allow set
+    /// containing all keys from `special_tokens_encoder`, but avoids requiring
+    /// callers to materialize that set on every encode call.
+    pub fn encode_with_special_tokens(&self, text: &str) -> Vec<Rank> {
+        self.encode_impl(text, SpecialPolicy::AllowAll)
     }
 
     /// Look up a single token by its byte sequence.
@@ -1045,6 +1084,11 @@ impl CoreBPE {
         })
     }
 
+    #[pyo3(name = "encode_with_special_tokens")]
+    fn py_encode_with_special_tokens(&self, py: Python<'_>, text: &str) -> Vec<Rank> {
+        py.detach(|| self.encode_with_special_tokens(text))
+    }
+
     #[pyo3(name = "encode_ordinary_batch")]
     fn py_encode_ordinary_batch(&self, py: Python<'_>, texts: Vec<String>) -> Vec<Vec<Rank>> {
         py.detach(|| {
@@ -1065,6 +1109,18 @@ impl CoreBPE {
             let allowed = allowed_special.unwrap_or_default();
             let allowed_refs: HashSet<&str> = allowed.iter().map(|s| s.as_str()).collect();
             self.encode_batch(&refs, &allowed_refs)
+        })
+    }
+
+    #[pyo3(name = "encode_with_special_tokens_batch")]
+    fn py_encode_with_special_tokens_batch(
+        &self,
+        py: Python<'_>,
+        texts: Vec<String>,
+    ) -> Vec<Vec<Rank>> {
+        py.detach(|| {
+            let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
+            self.encode_with_special_tokens_batch(&refs)
         })
     }
 
@@ -1249,6 +1305,32 @@ mod tests {
         let empty: HashSet<&str> = HashSet::new();
         let tokens = bpe.encode("ab<|eot|>cd", &empty);
         assert!(!tokens.contains(&999));
+    }
+
+    #[test]
+    fn encode_with_special_tokens_allows_every_registered_special() {
+        let mut encoder = HashMap::default();
+        for b in b"abcdefghijklmnopqrstuvwxyz <>|_" {
+            encoder.insert(vec![*b], *b as Rank);
+        }
+        let mut specials = HashMap::default();
+        specials.insert("<|eot|>".to_string(), 999);
+        specials.insert("<|fim_prefix|>".to_string(), 1000);
+        let bpe = CoreBPE::new(encoder, specials, r"\w+|[<|>]").unwrap();
+
+        let text = "ab<|eot|>cd<|fim_prefix|>ef";
+        let allowed: HashSet<&str> = ["<|eot|>", "<|fim_prefix|>"].into_iter().collect();
+
+        let tokens = bpe.encode_with_special_tokens(text);
+        assert_eq!(tokens, bpe.encode(text, &allowed));
+        assert!(tokens.contains(&999));
+        assert!(tokens.contains(&1000));
+
+        let texts = ["ab<|eot|>", "cd<|fim_prefix|>"];
+        assert_eq!(
+            bpe.encode_with_special_tokens_batch(&texts),
+            bpe.encode_batch(&texts, &allowed)
+        );
     }
 
     #[test]

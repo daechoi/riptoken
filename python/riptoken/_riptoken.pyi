@@ -54,6 +54,14 @@ class CoreBPE:
         Releases the GIL during encoding.
         """
 
+    def encode_with_special_tokens(self, text: str) -> list[int]:
+        """Encode ``text``, allowing every registered special token.
+
+        This is equivalent to :meth:`encode` with all special-token strings in
+        the allow set, without materializing that set in Python. Releases the
+        GIL during encoding.
+        """
+
     def encode_ordinary_batch(self, texts: Sequence[str]) -> list[list[int]]:
         """Encode many texts in parallel, ignoring special tokens.
 
@@ -69,6 +77,15 @@ class CoreBPE:
         """Encode many texts in parallel with the given allowed special tokens.
 
         See :meth:`encode` for the per-text semantics and
+        :meth:`encode_ordinary_batch` for the parallelism model.
+        """
+
+    def encode_with_special_tokens_batch(
+        self, texts: Sequence[str]
+    ) -> list[list[int]]:
+        """Encode many texts in parallel, allowing every registered special token.
+
+        See :meth:`encode_with_special_tokens` for the per-text semantics and
         :meth:`encode_ordinary_batch` for the parallelism model.
         """
 
