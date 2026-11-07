@@ -700,19 +700,20 @@ fn byte_pair_merge_large(ranks: &HashMap<Vec<u8>, Rank>, piece: &[u8]) -> Vec<Ra
         })
         .collect();
 
-    // Heap entry: (Reverse(rank), start). Reverse so BinaryHeap is a min-heap.
-    let mut heap: BinaryHeap<(Reverse<Rank>, usize)> = BinaryHeap::with_capacity(n);
+    // Heap entry: Reverse((rank, start)), a min-heap on both, so rank ties pop
+    // the leftmost pair first, as in the Vec path and tiktoken.
+    let mut heap: BinaryHeap<Reverse<(Rank, usize)>> = BinaryHeap::with_capacity(n);
 
     // Seed with all initial pair ranks.
     for i in 0..n.saturating_sub(1) {
         let rank = rank_of(ranks, &piece[i..state[i + 1].end]);
         state[i].cur_rank = rank;
         if rank != Rank::MAX {
-            heap.push((Reverse(rank), i));
+            heap.push(Reverse((rank, i)));
         }
     }
 
-    while let Some((Reverse(rank), start)) = heap.pop() {
+    while let Some(Reverse((rank, start))) = heap.pop() {
         // Lazy invalidation: skip if this entry is stale.
         if state[start].cur_rank != rank || rank == Rank::MAX {
             continue;
@@ -740,7 +741,7 @@ fn byte_pair_merge_large(ranks: &HashMap<Vec<u8>, Rank>, piece: &[u8]) -> Vec<Ra
             let new_rank = rank_of(ranks, &piece[start..state[next_end].end]);
             state[start].cur_rank = new_rank;
             if new_rank != Rank::MAX {
-                heap.push((Reverse(new_rank), start));
+                heap.push(Reverse((new_rank, start)));
             }
         } else {
             state[start].cur_rank = Rank::MAX;
@@ -755,7 +756,7 @@ fn byte_pair_merge_large(ranks: &HashMap<Vec<u8>, Rank>, piece: &[u8]) -> Vec<Ra
             let new_rank = rank_of(ranks, &piece[prev..span_end]);
             state[prev].cur_rank = new_rank;
             if new_rank != Rank::MAX {
-                heap.push((Reverse(new_rank), prev));
+                heap.push(Reverse((new_rank, prev)));
             }
         }
     }
@@ -1492,5 +1493,31 @@ mod tests {
         };
         let large = byte_pair_merge_large(&ranks, piece);
         assert_eq!(small, large, "heap and vec paths disagree");
+    }
+
+    #[test]
+    fn large_piece_breaks_rank_ties_from_the_left() {
+        // In a run of one byte every pair has the same rank. tiktoken and the
+        // Vec path merge the leftmost pair first, so the heap path must too.
+        let mut ranks = HashMap::default();
+        for b in 0u8..=255 {
+            ranks.insert(vec![b], b as Rank);
+        }
+        ranks.insert(b"aa".to_vec(), 300);
+        for n in [3, 5, 7] {
+            let piece = vec![b'a'; n];
+            let small = {
+                let pos = byte_pair_merge(&ranks, &piece);
+                pos.windows(2)
+                    .map(|w| rank_of(&ranks, &piece[w[0].0..w[1].0]))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                small.last(),
+                Some(&(b'a' as Rank)),
+                "odd run ends in a lone byte"
+            );
+            assert_eq!(byte_pair_merge_large(&ranks, &piece), small, "run of {n}");
+        }
     }
 }
