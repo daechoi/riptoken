@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Pieces of 500 bytes or more now merge equal-rank pairs from the left,
+  as tiktoken does. Before, the heap merge picked the rightmost pair, so
+  long runs of one character (e.g. `"a" + "-" * 500 + "b"` with
+  `cl100k_base`) could encode differently from tiktoken (#2).
+
 ## [0.3.0] — 2026-04-12
 
 Performance release. Eliminates the ~55 ms lazy-DFA cold-start on
