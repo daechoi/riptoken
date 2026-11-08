@@ -114,3 +114,20 @@ fn long_piece_takes_heap_path_and_matches() {
     // Every "abcd" should merge into the single token 302.
     assert!(tokens.iter().all(|&t| t == 302));
 }
+
+#[test]
+fn long_runs_merge_equal_rank_pairs_from_the_left() {
+    // Pieces of 500 bytes or more take the heap merge. With a single merge rule
+    // every pair in a run ties, and tiktoken merges the leftmost first (#2).
+    let mut encoder: FxHashMap<Vec<u8>, Rank> = FxHashMap::default();
+    encoder.insert(b"a".to_vec(), 0);
+    encoder.insert(b"aa".to_vec(), 1);
+    let bpe = CoreBPE::new(encoder, FxHashMap::default(), r"a+").unwrap();
+    for n in [499, 500, 501, 1001] {
+        let mut want = vec![1; n / 2];
+        if n % 2 == 1 {
+            want.push(0);
+        }
+        assert_eq!(bpe.encode_ordinary(&"a".repeat(n)), want, "run of {n}");
+    }
+}
