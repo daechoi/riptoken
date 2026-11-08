@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as tiktoken does. Before, the heap merge picked the rightmost pair, so
   long runs of one character (e.g. `"a" + "-" * 500 + "b"` with
   `cl100k_base`) could encode differently from tiktoken (#2).
+  Token ids for such inputs change from every earlier release, so ids
+  stored before this fix for them will not match.
 
 ## [0.3.0] — 2026-04-12
 
